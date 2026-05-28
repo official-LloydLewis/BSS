@@ -83,19 +83,31 @@ func (s *Source) Random() net.IP {
 
 // Stream emits random IPs on the returned channel until ctx is cancelled or
 // count IPs have been sent (count <= 0 means unlimited).
+//
+// Each IP is emitted at most once per call: duplicates are silently skipped.
+// For very large counts relative to the available address space the loop may
+// spin for longer, but Cloudflare's published ranges are large enough that
+// this is not a practical concern for the scan sizes the TUI exposes.
 func (s *Source) Stream(ctx context.Context, count int) <-chan net.IP {
 	ch := make(chan net.IP, 64)
 	go func() {
 		defer close(ch)
+		seen := make(map[string]struct{})
 		sent := 0
 		for {
 			if count > 0 && sent >= count {
 				return
 			}
+			ip := s.Random()
+			key := ip.String()
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
 			select {
 			case <-ctx.Done():
 				return
-			case ch <- s.Random():
+			case ch <- ip:
 				sent++
 			}
 		}

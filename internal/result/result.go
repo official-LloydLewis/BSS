@@ -105,7 +105,8 @@ func (r *Result) IsHealthy() bool {
 
 	switch r.ProbeMode {
 	case "http":
-		if !r.TLSOk {
+		// TLS is only expected on port 443; plain HTTP (port 80) has no TLS.
+		if r.Port == 443 && !r.TLSOk {
 			return false
 		}
 		if r.HTTPStatus < 200 || r.HTTPStatus >= 400 || r.Colo == "" {

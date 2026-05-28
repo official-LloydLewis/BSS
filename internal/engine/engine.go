@@ -112,7 +112,8 @@ func (e *Engine) RunList(ctx context.Context, ips []net.IP, fn ResultFunc) {
 	}
 	close(ch)
 
-	// Use a tighter timeout for the final test round
+	// Raise the timeout floor for the final validation round so slow IPs
+	// still get a fair chance rather than being cut off too early.
 	cfg := e.cfg
 	cfg.ProbeConfig.Timeout = max(cfg.ProbeConfig.Timeout, 10*time.Second)
 	e2 := New(cfg)

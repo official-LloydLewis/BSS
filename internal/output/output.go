@@ -34,12 +34,17 @@ func DetectFormat(path string) Format {
 }
 
 // Writer writes results to a file in a thread-safe manner.
+//
+// JSON output uses newline-delimited JSON (JSONL / JSON Lines): one JSON object
+// per line, with no enclosing array. Each line is a self-contained, valid JSON
+// value, so the file remains fully readable even if the process is interrupted
+// mid-scan. Readers can parse it with standard JSON streaming libraries or a
+// simple line-by-line loop.
 type Writer struct {
-	mu    sync.Mutex
-	f     *os.File
-	fmt   Format
-	csv   *csv.Writer
-	first bool // for JSON array formatting
+	mu  sync.Mutex
+	f   *os.File
+	fmt Format
+	csv *csv.Writer
 }
 
 // New creates (or truncates) the output file and returns a ready Writer.
@@ -49,18 +54,15 @@ func New(path string, fmt Format) (*Writer, error) {
 		return nil, fmt2err(path, err)
 	}
 
-	w := &Writer{f: f, fmt: fmt, first: true}
+	w := &Writer{f: f, fmt: fmt}
 
-	switch fmt {
-	case FormatCSV:
+	if fmt == FormatCSV {
 		w.csv = csv.NewWriter(f)
 		_ = w.csv.Write([]string{
 			"ip", "loss_pct", "avg_ms", "min_ms", "max_ms",
 			"jitter_ms", "download_kbps", "speed_tested", "colo", "tls_ok", "http_status",
 		})
 		w.csv.Flush()
-	case FormatJSON:
-		_, _ = f.WriteString("[\n")
 	}
 
 	return w, nil
@@ -86,9 +88,6 @@ func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.fmt == FormatJSON {
-		_, _ = w.f.WriteString("\n]\n")
-	}
 	if w.csv != nil {
 		w.csv.Flush()
 	}
@@ -114,6 +113,7 @@ func (w *Writer) writeCSV(r *result.Result) error {
 	return w.csv.Error()
 }
 
+// writeJSON appends one JSONL record (no trailing comma, no enclosing array).
 func (w *Writer) writeJSON(r *result.Result) error {
 	type jsonResult struct {
 		IP          string  `json:"ip"`
@@ -145,13 +145,7 @@ func (w *Writer) writeJSON(r *result.Result) error {
 	if err != nil {
 		return err
 	}
-	if !w.first {
-		_, err = w.f.WriteString(",\n")
-		if err != nil {
-			return err
-		}
-	}
-	w.first = false
+	b = append(b, '\n')
 	_, err = w.f.Write(b)
 	return err
 }
@@ -167,39 +161,6 @@ func (w *Writer) writeTXT(r *result.Result) error {
 	)
 	_, err := w.f.WriteString(line)
 	return err
-}
-
-// --- State / Resume ----------------------------------------------------------
-
-// State persists scanner progress for resume capability.
-type State struct {
-	Tested  int64    `json:"tested"`
-	Healthy int64    `json:"healthy"`
-	Seen    []string `json:"seen"`
-}
-
-// LoadState reads a previously saved state file. Returns empty State on error.
-func LoadState(path string) State {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return State{}
-	}
-	var s State
-	_ = json.Unmarshal(b, &s)
-	return State{Tested: s.Tested, Healthy: s.Healthy, Seen: s.Seen}
-}
-
-// SaveState atomically writes the state to disk.
-func SaveState(path string, s State) error {
-	b, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 // --- helpers -----------------------------------------------------------------

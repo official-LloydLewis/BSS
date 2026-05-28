@@ -21,20 +21,19 @@ Run `senpaiscanner` and you land in a menu. From there you navigate everything w
 │  ▶  Quick Scan    scan random CF IPs │
 │     Custom Scan   configure details  │
 │     Test IPs      validate a list    │
-│     Discover PoPs find reachable DCs │
+│     Discover Colos find reachable DCs │
 │     About                            │
 │     Quit                             │
 └──────────────────────────────────────┘
 ```
 
 The scanner:
-- Probes Cloudflare's IP ranges via TCP, TLS handshake, or full HTTPS validation
-- Rotates SNI hostnames to reduce DPI interference
-- Measures latency, packet loss, and jitter across multiple tries
-- Identifies the PoP (datacenter) behind each IP via `/cdn-cgi/trace`
-- Runs a small download sample in HTTP mode so "0% loss" does not mean "good" by itself
-- Shows everything live in a color-coded table as results come in
-- Exports to CSV, JSON, or plain text
+- Probes Cloudflare's IP ranges via **TCP**, **TLS handshake**, or **HTTP** validation (`http` / `https` in Custom Scan)
+- In **TCP/TLS** mode with empty SNI, rotates through several well-known Cloudflare hostnames per try; **HTTP** mode uses `speed.cloudflare.com` for trace and download
+- Measures latency, packet loss, jitter, and (in HTTP mode) a small download throughput sample
+- Identifies the colo (Cloudflare PoP) behind each IP via `/cdn-cgi/trace` (with `CF-Ray` fallback)
+- Shows live results in a color-coded table; after a scan, a **Results** screen lists the top healthy IPs
+- Writes **CSV, JSON, or TXT** only when you set an output path in **Custom Scan** (other modes are on-screen only)
 
 ---
 
@@ -77,11 +76,13 @@ go install github.com/matinsenpai/senpaiscanner/cmd/senpaiscanner@latest
 ## Usage
 
 ```bash
-senpaiscanner           # open the TUI
-senpaiscanner --version # print version and exit
+senpaiscanner              # open the TUI
+senpaiscanner --version    # print version and exit
+senpaiscanner -v           # same
+senpaiscanner version      # same
 ```
 
-That's it. Everything else is inside the TUI.
+Everything else is inside the TUI — there are no scan-related CLI flags.
 
 ### Navigation
 
@@ -91,12 +92,14 @@ That's it. Everything else is inside the TUI.
 | `←` / `→` or `h` / `l` | move between options within a row |
 | `Enter` | select / confirm / start scan |
 | `Esc` | go back |
-| `q` | quit (or back to menu during a scan) |
+| `q` | quit from menu; during a live scan, cancel or go to Results when finished |
 
 ### Scan screens
 
 #### Quick Scan
-Opens a three-row setup screen before starting. Use `↑/↓` to move between rows and `←/→` to pick a preset. Press Enter to confirm a row selection or to launch the scan.
+Opens a three-row setup screen. Use `↑/↓` to move between rows and `←/→` to pick a preset.
+
+**Enter on a preset launches the scan immediately** (you do not need to visit every row). Workers and timeout use whatever is currently selected on those rows — on first open the defaults are **100** workers and **3s** timeout. Choose **Custom** on a row to type your own value; after the last row, Enter starts the scan.
 
 **Count** — how many IPs to probe:
 
@@ -140,31 +143,43 @@ A form where you configure:
 | CIDR | (all CF) | e.g. `104.16.0.0/13` |
 | Output | (none) | `.csv`, `.json`, or `.txt` |
 | Colo filter | (all) | e.g. `FRA,AMS` |
-| SNI | (auto) | override TLS hostname |
-| Mode | HTTP | `http`, `tls`, or `tcp` |
+| SNI | (empty) | override hostname; empty = rotate (TCP/TLS) or `speed.cloudflare.com` (HTTP) |
+| Mode | HTTP | `http` (or `https`), `tls`, or `tcp` — cycle with **Ctrl+← / Ctrl+→** |
 | IPv4 / IPv6 | v4 on | toggle with F2 / F3 |
 
-Navigate fields with Tab / Shift+Tab. Press Enter to start. Timeout accepts Go durations like `1500ms` or `5s`; a plain number is treated as seconds.
+Navigate fields with Tab / Shift+Tab (or ↑/↓). Press Enter to start. Timeout accepts Go durations like `1500ms` or `5s`; a plain number is treated as seconds.
+
+Set **Output** to a path ending in `.csv`, `.json`, or `.txt` to stream results to disk during the scan. Quick Scan, Test IPs, and Discover Colos do not write files.
 
 #### Test IPs
-Reads IPs from `ips.txt` (one per line, or CSV first column) in the current directory, then runs a deeper validation: 6 tries, 10s timeout, HTTP mode, colo detection, and a larger download sample. Good for confirming scan results before putting them in a proxy config.
+Put IPs in `ips.txt` in the **current working directory** (one per line, or CSV with IP in the first column) **before** you select this menu item. The scan **starts as soon as you choose Test IPs** from the menu.
 
-#### Discover PoPs
-Probes 300 random IPs via HTTP to map which Cloudflare datacenters are reachable from your network. Shows a table grouped by colo with average and best latency.
+Settings: HTTP on port 443, 6 tries, 10s timeout, 20 workers, fixed SNI `speed.cloudflare.com`, 512 KiB download sample, colo via `/cdn-cgi/trace`. Good for confirming candidates before putting them in a proxy config.
+
+#### Discover Colos
+Probes **300** random **IPv4** addresses via HTTP (`/cdn-cgi/trace` only — no download sample, 2 tries, 5s timeout). When finished, shows a table grouped by colo with average and best latency among healthy results.
 
 ### Live scan keys
 
 | Key | Action |
 |-----|--------|
-| `s` | cycle sort: avg → loss → jitter → colo |
-| `q` / `Esc` | abort scan and go back |
-| `Enter` (after done) | view results page |
+| `s` | cycle sort: avg → loss → jitter → colo → speed (download) |
+| `q` / `Esc` | while running: cancel and return to menu; when done: open **Results** |
+| `Enter` | when done: open **Results** |
+
+### Results screen
+
+After Quick Scan or Custom Scan finishes, shows up to **20** healthy IPs (sorted by average latency). `s` re-sorts; `Enter` / `q` / `Esc` return to the main menu. There is no file export from this screen — use Custom Scan **Output** if you need a file.
+
+### About
+
+Version string and short project blurb; `Enter` / `q` / `Esc` back to the menu.
 
 ---
 
 ## Output formats
 
-When an output file is set in Custom Scan, all results are written there in real time.
+Only **Custom Scan** writes a file, when **Output** is set. Rows are appended in real time as results arrive.
 
 **CSV** (`.csv`):
 ```
@@ -194,7 +209,7 @@ ip,loss_pct,avg_ms,min_ms,max_ms,jitter_ms,download_kbps,speed_tested,colo,tls_o
 
 **Filter by colo.** If your proxy server is physically in one city, restrict to that colo so you're not routing traffic around the world: set colo filter to `FRA` for Frankfurt, `AMS` for Amsterdam, and so on.
 
-**SNI auto-rotation.** By default, the scanner rotates through several well-known Cloudflare hostnames for the TLS SNI field. If you're seeing consistent handshake failures, try overriding SNI with a domain you control that's behind Cloudflare.
+**SNI.** In Custom Scan, leave SNI empty for automatic behavior: **TCP/TLS** rotates hostnames per try; **HTTP** (Quick Scan default) always uses `speed.cloudflare.com`. Override SNI if you need a specific hostname (especially for TLS/TCP on filtered networks).
 
 **Final proxy validation still matters.** The strongest test is replacing the address in your VLESS/VMess/Trojan config and testing through Xray/V2Ray, because DPI behavior can depend on transport, SNI, path, ALPN, and fragmentation settings.
 

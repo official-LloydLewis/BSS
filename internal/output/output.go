@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
 )
 
 // Format identifies the output format.
@@ -22,14 +22,16 @@ const (
 )
 
 // DetectFormat infers the output format from the file extension.
-func DetectFormat(path string) Format {
+func DetectFormat(path string) (Format, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
+	case ".csv":
+		return FormatCSV, nil
 	case ".json", ".jsonl":
-		return FormatJSON
+		return FormatJSON, nil
 	case ".txt":
-		return FormatTXT
+		return FormatTXT, nil
 	default:
-		return FormatCSV
+		return FormatCSV, fmt.Errorf("unknown output extension for %q (supported: .csv, .json, .jsonl, .txt)", path)
 	}
 }
 
@@ -49,6 +51,9 @@ type Writer struct {
 
 // New creates (or truncates) the output file and returns a ready Writer.
 func New(path string, fmt Format) (*Writer, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, fmt2err(path, err)
+	}
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, fmt2err(path, err)
@@ -58,11 +63,18 @@ func New(path string, fmt Format) (*Writer, error) {
 
 	if fmt == FormatCSV {
 		w.csv = csv.NewWriter(f)
-		_ = w.csv.Write([]string{
+		if err := w.csv.Write([]string{
 			"ip", "loss_pct", "avg_ms", "min_ms", "max_ms",
 			"jitter_ms", "download_kbps", "speed_tested", "colo", "tls_ok", "ws_ok", "http_status",
-		})
+		}); err != nil {
+			f.Close()
+			return nil, err
+		}
 		w.csv.Flush()
+		if err := w.csv.Error(); err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
 
 	return w, nil
@@ -175,4 +187,22 @@ func boolStr(b bool) string {
 
 func fmt2err(path string, err error) error {
 	return fmt.Errorf("opening output file %q: %w", path, err)
+}
+
+// WriteLines writes text lines to path, creating parent directories first.
+func WriteLines(path string, lines []string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt2err(path, err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt2err(path, err)
+	}
+	defer f.Close()
+	for _, line := range lines {
+		if _, err := f.WriteString(line + "\n"); err != nil {
+			return err
+		}
+	}
+	return nil
 }

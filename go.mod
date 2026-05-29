@@ -1,4 +1,4 @@
-module github.com/matinsenpai/senpaiscanner
+module github.com/official-LloydLewis/SenPaiScanner
 
 go 1.26.3
 

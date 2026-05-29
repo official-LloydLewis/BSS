@@ -179,8 +179,10 @@ func runScan(cfg ScanConfig, scanID int64) {
 
 	var writer *output.Writer
 	if cfg.OutputFile != "" {
-		fmt2 := output.DetectFormat(cfg.OutputFile)
-		if w, e := output.New(cfg.OutputFile, fmt2); e == nil {
+		fmt2, e := output.DetectFormat(cfg.OutputFile)
+		if e != nil {
+			sendError(scanID, fmt.Sprintf("Output disabled: %v", e))
+		} else if w, e := output.New(cfg.OutputFile, fmt2); e == nil {
 			writer = w
 			defer writer.Close()
 		} else {

@@ -5,10 +5,8 @@ import (
 	"fmt"
 )
 
-// BuildXrayConfig generates a minimal xray-core JSON config from a VLESSConfig.
-// It creates a SOCKS inbound on the given port and a VLESS outbound.
-func BuildXrayConfig(cfg *VLESSConfig, socksPort int) ([]byte, error) {
-	config := map[string]interface{}{
+func baseXrayConfig(socksPort int, outbound map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{
 		"log": map[string]interface{}{
 			"loglevel": "none",
 			"access":   "",
@@ -33,7 +31,7 @@ func BuildXrayConfig(cfg *VLESSConfig, socksPort int) ([]byte, error) {
 			},
 		},
 		"outbounds": []map[string]interface{}{
-			buildOutbound(cfg),
+			outbound,
 			{
 				"tag":      "direct",
 				"protocol": "freedom",
@@ -41,8 +39,12 @@ func BuildXrayConfig(cfg *VLESSConfig, socksPort int) ([]byte, error) {
 			},
 		},
 	}
+}
 
-	return json.MarshalIndent(config, "", "  ")
+// BuildXrayConfig generates a minimal xray-core JSON config from a VLESSConfig.
+// It creates a SOCKS inbound on the given port and a VLESS outbound.
+func BuildXrayConfig(cfg *VLESSConfig, socksPort int) ([]byte, error) {
+	return json.MarshalIndent(baseXrayConfig(socksPort, buildOutbound(cfg)), "", "  ")
 }
 
 func buildOutbound(cfg *VLESSConfig) map[string]interface{} {
@@ -144,4 +146,43 @@ func BuildXrayConfigJSON(cfg *VLESSConfig, socksPort int) (string, error) {
 		return "", fmt.Errorf("building xray config: %w", err)
 	}
 	return string(b), nil
+}
+
+// BuildTrojanXrayConfig generates a minimal xray JSON config from a TrojanConfig.
+func BuildTrojanXrayConfig(cfg *TrojanConfig, socksPort int) ([]byte, error) {
+	return json.MarshalIndent(baseXrayConfig(socksPort, buildTrojanOutbound(cfg)), "", "  ")
+}
+
+func buildTrojanOutbound(cfg *TrojanConfig) map[string]interface{} {
+	return map[string]interface{}{
+		"tag":      "proxy",
+		"protocol": "trojan",
+		"settings": map[string]interface{}{
+			"servers": []map[string]interface{}{
+				{
+					"address":  cfg.Address,
+					"port":     cfg.Port,
+					"password": cfg.Password,
+				},
+			},
+		},
+		"streamSettings": buildTrojanStreamSettings(cfg),
+	}
+}
+
+func buildTrojanStreamSettings(cfg *TrojanConfig) map[string]interface{} {
+	vlessLike := &VLESSConfig{
+		Network:     cfg.Network,
+		Path:        cfg.Path,
+		Host:        cfg.Host,
+		ServiceName: cfg.ServiceName,
+		Mode:        cfg.Mode,
+		Authority:   cfg.Authority,
+		Security:    cfg.Security,
+		SNI:         cfg.SNI,
+		Fingerprint: cfg.Fingerprint,
+		ALPN:        cfg.ALPN,
+		Insecure:    cfg.Insecure,
+	}
+	return buildStreamSettings(vlessLike)
 }

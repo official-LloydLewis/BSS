@@ -236,6 +236,9 @@ type AppModel struct {
 	configPhase1Done    bool
 	configPhase1Stats   StatsMsg
 
+	// emergency scan
+	emergencyIgnoreHistory bool
+
 	// shared
 	statusMsg string
 	version   string
@@ -534,6 +537,7 @@ func (m AppModel) selectMenuItem() (tea.Model, tea.Cmd) {
 		m.configInput.Placeholder = "vless://..."
 		m.configInput.SetValue("")
 		m.configInput.Focus()
+		m.emergencyIgnoreHistory = false
 		m.configResults = nil
 		m.configScanning = false
 		m.configDone = false
@@ -1405,7 +1409,7 @@ func (m AppModel) viewAbout() string {
 	sb.WriteString(styleNormal.Render("  jitter, and identifies the colo (PoP) behind each IP."))
 	sb.WriteString("\n\n")
 
-	sb.WriteString(styleDim.Render("  github.com/matinsenpai/senpaiscanner"))
+	sb.WriteString(styleDim.Render("  github.com/official-LloydLewis/SenPaiScanner"))
 	sb.WriteString("\n\n")
 	sb.WriteString(styleHint.Render("  enter/q → back"))
 	return sb.String()

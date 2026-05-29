@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
 )
 
 // sniHostnames is a list of well-known Cloudflare hostnames used as SNI values.

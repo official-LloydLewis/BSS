@@ -9,8 +9,8 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/matinsenpai/senpaiscanner/internal/prober"
-	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/prober"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
 )
 
 // Config controls engine behaviour.
@@ -42,9 +42,10 @@ func WithStopCancel(ctx context.Context, cancel context.CancelFunc) context.Cont
 
 // Engine orchestrates a pool of prober goroutines.
 type Engine struct {
-	cfg     Config
-	stats   Stats
-	limiter *rate.Limiter
+	cfg         Config
+	stats       Stats
+	stopHealthy atomic.Int64
+	limiter     *rate.Limiter
 }
 
 // New creates a new Engine.
@@ -132,8 +133,18 @@ func (e *Engine) RunList(ctx context.Context, ips []net.IP, fn ResultFunc) {
 
 	// Raise the timeout floor for the final validation round so slow IPs
 	// still get a fair chance rather than being cut off too early.
-	cfg := e.cfg
-	cfg.ProbeConfig.Timeout = max(cfg.ProbeConfig.Timeout, 10*time.Second)
-	e2 := New(cfg)
-	e2.Run(ctx, ch, fn)
+	originalTimeout := e.cfg.ProbeConfig.Timeout
+	e.cfg.ProbeConfig.Timeout = max(e.cfg.ProbeConfig.Timeout, 10*time.Second)
+	defer func() { e.cfg.ProbeConfig.Timeout = originalTimeout }()
+	e.Run(ctx, ch, fn)
+}
+
+func (e *Engine) shouldStopAfter(r *result.Result) bool {
+	if e.cfg.StopAfterHealthy <= 0 || !r.IsHealthy() {
+		return false
+	}
+	if e.cfg.StopHealthyFunc != nil && !e.cfg.StopHealthyFunc(r) {
+		return false
+	}
+	return e.stopHealthy.Add(1) >= int64(e.cfg.StopAfterHealthy)
 }

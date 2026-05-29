@@ -42,7 +42,7 @@ func Render(frame int) string {
 	for _, line := range lines {
 		runes := []rune(line)
 		for col, r := range runes {
-			idx := ((col + frame) % len(rainbowPalette) + len(rainbowPalette)) % len(rainbowPalette)
+			idx := ((col+frame)%len(rainbowPalette) + len(rainbowPalette)) % len(rainbowPalette)
 			style := lipgloss.NewStyle().Foreground(lipgloss.Color(rainbowPalette[idx])).Bold(true)
 			out.WriteString(style.Render(string(r)))
 		}

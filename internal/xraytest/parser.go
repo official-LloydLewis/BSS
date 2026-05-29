@@ -203,3 +203,82 @@ func paramOr(params url.Values, key, fallback string) string {
 	}
 	return v
 }
+
+// TrojanConfig holds parsed parameters from a trojan:// share URL.
+type TrojanConfig struct {
+	Password string
+	Address  string
+	Port     int
+
+	Network     string
+	Path        string
+	Host        string
+	ServiceName string
+	Mode        string
+	Authority   string
+
+	Security    string
+	SNI         string
+	Fingerprint string
+	ALPN        []string
+	Insecure    bool
+	Remark      string
+}
+
+// ParseTrojan parses a trojan:// share URL into a TrojanConfig.
+func ParseTrojan(raw string) (*TrojanConfig, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse trojan URL: %w", err)
+	}
+	if strings.ToLower(u.Scheme) != "trojan" {
+		return nil, fmt.Errorf("not a trojan:// URL")
+	}
+	if u.User == nil || u.Host == "" {
+		return nil, fmt.Errorf("missing password or server address")
+	}
+	password, _ := u.User.Password()
+	if password == "" {
+		password = u.User.Username()
+	}
+	if password == "" {
+		return nil, fmt.Errorf("missing password")
+	}
+	host := u.Hostname()
+	portStr := u.Port()
+	if host == "" || portStr == "" {
+		return nil, fmt.Errorf("missing host or port")
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
+	}
+	params := u.Query()
+	cfg := &TrojanConfig{
+		Password:    password,
+		Address:     host,
+		Port:        port,
+		Network:     paramOr(params, "type", "tcp"),
+		Security:    paramOr(params, "security", "tls"),
+		SNI:         params.Get("sni"),
+		Fingerprint: params.Get("fp"),
+		Insecure:    params.Get("insecure") == "1" || params.Get("allowInsecure") == "1",
+		Remark:      u.Fragment,
+	}
+	if cfg.SNI == "" {
+		cfg.SNI = params.Get("peer")
+	}
+	switch cfg.Network {
+	case "ws":
+		cfg.Path = paramOr(params, "path", "/")
+		cfg.Host = paramOr(params, "host", cfg.SNI)
+	case "grpc":
+		cfg.ServiceName = params.Get("serviceName")
+		cfg.Authority = params.Get("authority")
+		cfg.Mode = paramOr(params, "mode", "gun")
+	}
+	if alpnStr := params.Get("alpn"); alpnStr != "" {
+		cfg.ALPN = strings.Split(alpnStr, ",")
+	}
+	return cfg, nil
+}

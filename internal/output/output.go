@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
 )
 
 // Format identifies the output format.
@@ -22,14 +22,16 @@ const (
 )
 
 // DetectFormat infers the output format from the file extension.
-func DetectFormat(path string) Format {
+func DetectFormat(path string) (Format, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
+	case ".csv":
+		return FormatCSV, nil
 	case ".json", ".jsonl":
-		return FormatJSON
+		return FormatJSON, nil
 	case ".txt":
-		return FormatTXT
+		return FormatTXT, nil
 	default:
-		return FormatCSV
+		return FormatCSV, fmt.Errorf("unknown output extension for %q (supported: .csv, .json, .jsonl, .txt)", path)
 	}
 }
 

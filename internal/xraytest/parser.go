@@ -1,6 +1,8 @@
 package xraytest
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -281,4 +283,82 @@ func ParseTrojan(raw string) (*TrojanConfig, error) {
 		cfg.ALPN = strings.Split(alpnStr, ",")
 	}
 	return cfg, nil
+}
+
+// ShareSummary is a compact, UI-safe summary of a supported share URL.
+type ShareSummary struct {
+	Protocol  string
+	Server    string
+	Port      int
+	Transport string
+	SNI       string
+	Host      string
+	Path      string
+}
+
+// ParseShareSummary extracts common fields from vless://, trojan://, and vmess:// URLs.
+func ParseShareSummary(raw string) (ShareSummary, error) {
+	raw = strings.TrimSpace(raw)
+	scheme := ""
+	if idx := strings.Index(raw, "://"); idx > 0 {
+		scheme = strings.ToLower(raw[:idx])
+	}
+	switch scheme {
+	case "vless":
+		cfg, err := ParseVLESS(raw)
+		if err != nil {
+			return ShareSummary{}, err
+		}
+		return ShareSummary{Protocol: "vless", Server: cfg.Address, Port: cfg.Port, Transport: cfg.Network, SNI: cfg.SNI, Host: cfg.Host, Path: cfg.Path}, nil
+	case "trojan":
+		cfg, err := ParseTrojan(raw)
+		if err != nil {
+			return ShareSummary{}, err
+		}
+		return ShareSummary{Protocol: "trojan", Server: cfg.Address, Port: cfg.Port, Transport: cfg.Network, SNI: cfg.SNI, Host: cfg.Host, Path: cfg.Path}, nil
+	case "vmess":
+		payload := strings.TrimSpace(strings.TrimPrefix(raw, "vmess://"))
+		decoded, err := decodeVmess(payload)
+		if err != nil {
+			return ShareSummary{}, fmt.Errorf("decode vmess: %w", err)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(decoded, &obj); err != nil {
+			return ShareSummary{}, fmt.Errorf("parse vmess json: %w", err)
+		}
+		server := firstString(obj, "add", "address")
+		port, _ := strconv.Atoi(firstString(obj, "port"))
+		return ShareSummary{
+			Protocol:  "vmess",
+			Server:    server,
+			Port:      port,
+			Transport: firstString(obj, "net", "type"),
+			SNI:       firstString(obj, "sni", "serverName"),
+			Host:      firstString(obj, "host"),
+			Path:      firstString(obj, "path"),
+		}, nil
+	default:
+		return ShareSummary{}, fmt.Errorf("unsupported config scheme")
+	}
+}
+
+func firstString(obj map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := obj[key]; ok {
+			switch x := v.(type) {
+			case string:
+				return x
+			case float64:
+				return strconv.Itoa(int(x))
+			}
+		}
+	}
+	return ""
+}
+
+func decodeVmess(s string) ([]byte, error) {
+	if b, err := base64.RawStdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.StdEncoding.DecodeString(s)
 }

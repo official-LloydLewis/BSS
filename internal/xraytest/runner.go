@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -24,6 +25,7 @@ type ValidationResult struct {
 	IP         string
 	Port       int
 	Success    bool
+	Skipped    bool
 	Latency    time.Duration
 	Throughput float64
 	BytesRecv  int64
@@ -58,14 +60,15 @@ func validateOnce(ctx context.Context, cfg *VLESSConfig, timeout time.Duration) 
 	result := &ValidationResult{IP: cfg.Address, Port: cfg.Port, Transport: cfg.Network}
 	path, err := exec.LookPath("xray")
 	if err != nil {
-		result.Error = "xray binary not found; validation skipped"
+		result.Skipped = true
+		result.Error = "xray missing"
 		return result
 	}
 
 	socksPort := nextPort()
 	configJSON, err := BuildXrayConfig(cfg, socksPort)
 	if err != nil {
-		result.Error = fmt.Sprintf("build config: %v", err)
+		result.Error = fmt.Sprintf("invalid config: %v", err)
 		return result
 	}
 	tmpFile, err := os.CreateTemp("", "xray-test-*.json")
@@ -96,7 +99,7 @@ func validateOnce(ctx context.Context, cfg *VLESSConfig, timeout time.Duration) 
 	}()
 
 	if !waitForPort(socksPort, 3*time.Second) {
-		result.Error = "socks port not ready after 3s"
+		result.Error = "no response"
 		return result
 	}
 
@@ -107,7 +110,7 @@ func validateOnce(ctx context.Context, cfg *VLESSConfig, timeout time.Duration) 
 	bytesRecv, err := downloadThroughProxy(testCtx, proxyURL, 1024*1024)
 	elapsed := time.Since(start)
 	if err != nil {
-		result.Error = fmt.Sprintf("download: %v", err)
+		result.Error = classifyValidationError(err)
 		result.Latency = elapsed
 		return result
 	}
@@ -158,4 +161,102 @@ func waitForPort(port int, timeout time.Duration) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return false
+}
+
+// ValidateTrojanConfig starts xray with a Trojan config and checks proxy traffic.
+func ValidateTrojanConfig(ctx context.Context, cfg *TrojanConfig, timeout time.Duration) *ValidationResult {
+	res := validateTrojanOnce(ctx, cfg, timeout)
+	if !res.Success && !res.Skipped && XrayAvailable() {
+		time.Sleep(500 * time.Millisecond)
+		res2 := validateTrojanOnce(ctx, cfg, timeout)
+		res2.Retries = 1
+		if res2.Success {
+			return res2
+		}
+		res.Retries = 1
+	}
+	return res
+}
+
+func validateTrojanOnce(ctx context.Context, cfg *TrojanConfig, timeout time.Duration) *ValidationResult {
+	result := &ValidationResult{IP: cfg.Address, Port: cfg.Port, Transport: cfg.Network}
+	path, err := exec.LookPath("xray")
+	if err != nil {
+		result.Skipped = true
+		result.Error = "xray missing"
+		return result
+	}
+
+	socksPort := nextPort()
+	configJSON, err := BuildTrojanXrayConfig(cfg, socksPort)
+	if err != nil {
+		result.Error = fmt.Sprintf("invalid config: %v", err)
+		return result
+	}
+	tmpFile, err := os.CreateTemp("", "xray-test-*.json")
+	if err != nil {
+		result.Error = fmt.Sprintf("create temp file: %v", err)
+		return result
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.Write(configJSON); err != nil {
+		tmpFile.Close()
+		result.Error = fmt.Sprintf("write config: %v", err)
+		return result
+	}
+	_ = tmpFile.Close()
+
+	procCtx, cancelProc := context.WithCancel(ctx)
+	defer cancelProc()
+	cmd := exec.CommandContext(procCtx, path, "run", "-config", tmpFile.Name())
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		result.Error = fmt.Sprintf("start xray: %v", err)
+		return result
+	}
+	defer func() {
+		cancelProc()
+		_ = cmd.Wait()
+	}()
+
+	if !waitForPort(socksPort, 3*time.Second) {
+		result.Error = "no response"
+		return result
+	}
+
+	proxyURL := fmt.Sprintf("socks5://127.0.0.1:%d", socksPort)
+	testCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	start := time.Now()
+	bytesRecv, err := downloadThroughProxy(testCtx, proxyURL, 1024*1024)
+	elapsed := time.Since(start)
+	if err != nil {
+		result.Error = classifyValidationError(err)
+		result.Latency = elapsed
+		return result
+	}
+	result.Success = true
+	result.Latency = elapsed
+	result.BytesRecv = bytesRecv
+	if elapsed.Seconds() > 0 {
+		result.Throughput = float64(bytesRecv) / elapsed.Seconds()
+	}
+	return result
+}
+
+func classifyValidationError(err error) string {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "context deadline exceeded"), strings.Contains(msg, "timeout"):
+		return "timeout"
+	case strings.Contains(msg, "handshake"):
+		return "handshake failed"
+	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "connection reset"), strings.Contains(msg, "no route"), strings.Contains(msg, "eof"):
+		return "no response"
+	case strings.Contains(msg, "unsupported protocol scheme"), strings.Contains(msg, "invalid"):
+		return "invalid config"
+	default:
+		return err.Error()
+	}
 }

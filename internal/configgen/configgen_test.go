@@ -51,3 +51,31 @@ func TestGenerateInvalid(t *testing.T) {
 		t.Fatal("expected missing host error")
 	}
 }
+
+func TestGenerateVLESSPreservesValidationSensitiveFields(t *testing.T) {
+	base := "vless://uuid-123@example.com:8443?encryption=none&security=reality&sni=sni.example.com&fp=chrome&type=xhttp&host=host.example.com&path=%2Fx%2Fy&flow=xtls-rprx-vision&mode=auto&fragment=1-2#frag-name"
+	got, err := Generate(base, []net.IP{net.ParseIP("104.18.0.9")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := got[0]
+	checks := []string{
+		"vless://uuid-123@104.18.0.9:8443?",
+		"encryption=none",
+		"security=reality",
+		"sni=sni.example.com",
+		"fp=chrome",
+		"type=xhttp",
+		"host=host.example.com",
+		"path=%2Fx%2Fy",
+		"flow=xtls-rprx-vision",
+		"mode=auto",
+		"fragment=1-2",
+		"#frag-name",
+	}
+	for _, check := range checks {
+		if !strings.Contains(out, check) {
+			t.Fatalf("generated config %q missing preserved field %q", out, check)
+		}
+	}
+}

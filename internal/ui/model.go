@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -302,8 +303,8 @@ func NewApp(version string) AppModel {
 
 	// Config input for "Scan with Config"
 	cfgInput := textinput.New()
-	cfgInput.Placeholder = "vless://..."
-	cfgInput.CharLimit = 2000
+	cfgInput.Placeholder = "vless://, trojan://, or vmess://..."
+	cfgInput.CharLimit = 8192
 	cfgInput.Width = 0 // 0 = no fixed width, grows with content
 	m.configInput = cfgInput
 	m.modeIdx = modeIndex(m.scanCfg.Mode)
@@ -1565,7 +1566,14 @@ func (m AppModel) viewScanWithConfig() string {
 			sb.WriteString(styleDim.Render("  Config") + "  ")
 		}
 		sb.WriteString(m.configInput.View() + "\n")
-		sb.WriteString(styleDim.Render("           your VLESS share URL") + "\n\n")
+		sb.WriteString(styleDim.Render("           your VLESS/Trojan/VMess share URL (max 8192 chars)") + "\n")
+		if summary := configSummaryLine(m.configInput.Value()); summary != "" {
+			sb.WriteString(styleDim.Render("           "+summary) + "\n")
+		}
+		if m.statusMsg != "" {
+			sb.WriteString(styleWarn.Render("           "+m.statusMsg) + "\n")
+		}
+		sb.WriteString("\n")
 
 		// Row 1: Count
 		if m.configSetupRow == 1 {
@@ -1605,7 +1613,7 @@ func (m AppModel) viewScanWithConfig() string {
 		sb.WriteString("\n")
 		sb.WriteString(styleDim.Render("           best IPs to validate with xray") + "\n\n")
 
-		sb.WriteString(styleHint.Render("  ↑/↓ row   ←/→ option   enter start   esc back") + "\n")
+		sb.WriteString(styleHint.Render("  ↑/↓ row   ←/→ option   p paste   ctrl+v paste when supported   enter start   esc back") + "\n")
 		return sb.String()
 	}
 
@@ -1617,6 +1625,7 @@ func (m AppModel) viewScanWithConfig() string {
 	}
 	success := m.configSuccessCount()
 	failed := m.configFailCount()
+	skipped := m.configSkipCount()
 
 	icon := m.spinner.View()
 	if m.configDone {
@@ -1631,18 +1640,19 @@ func (m AppModel) viewScanWithConfig() string {
 		styleDim.Render(strings.Repeat("░", bw-filled)) + "]" +
 		fmt.Sprintf(" %.0f%%", pct)
 
-	sb.WriteString(fmt.Sprintf("  %s  tested: %s  healthy: %s  failed: %s  %s\n\n",
+	sb.WriteString(fmt.Sprintf("  %s  tested: %s  healthy: %s  failed: %s  skipped: %s  %s\n\n",
 		icon,
 		styleAccent.Render(fmt.Sprintf("%d/%d", done, total)),
 		styleGood.Render(fmt.Sprintf("%d", success)),
 		styleBad.Render(fmt.Sprintf("%d", failed)),
+		styleWarn.Render(fmt.Sprintf("%d", skipped)),
 		progBar,
 	))
 
 	// Table header
-	hdr := fmt.Sprintf("  %-16s  %-8s  %8s  %8s  %6s",
+	hdr := fmt.Sprintf("  %-15s %-8s %-10s %-8s %-24s",
 		"IP", "TYPE", "SPEED", "LATENCY", "STATUS")
-	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 56))))
+	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 70))))
 
 	// Results
 	maxRows := m.height - 12
@@ -1657,21 +1667,25 @@ func (m AppModel) viewScanWithConfig() string {
 	for _, r := range rows {
 		if r.Success {
 			mbps := r.Throughput * 8 / 1000000
-			line := fmt.Sprintf("  %-16s  %-8s  %5.1f Mbps  %5dms  %6s",
-				r.IP, r.Transport, mbps, r.Latency.Milliseconds(), "✓")
+			line := fmt.Sprintf("  %-15s %-8s %-10s %-8s %-24s",
+				compactText(r.IP, 15), compactText(r.Transport, 8), fmt.Sprintf("%.1fMbps", mbps), fmt.Sprintf("%dms", r.Latency.Milliseconds()), "ok")
 			sb.WriteString(styleGood.Render(line) + "\n")
 		} else {
-			errMsg := r.Error
-			if len(errMsg) > 20 {
-				errMsg = errMsg[:20] + "…"
+			reason := compactText(shortValidationReason(r.Error), 24)
+			statusStyle := styleBad
+			if r.Skipped {
+				statusStyle = styleWarn
 			}
-			line := fmt.Sprintf("  %-16s  %-8s  %9s  %8s  %6s",
-				r.IP, r.Transport, "—", "—", "✗")
-			sb.WriteString(styleBad.Render(line) + "\n")
+			line := fmt.Sprintf("  %-15s %-8s %-10s %-8s %-24s",
+				compactText(r.IP, 15), compactText(r.Transport, 8), "—", "—", reason)
+			sb.WriteString(statusStyle.Render(line) + "\n")
 		}
 	}
 
 	sb.WriteRune('\n')
+	if m.configDone && done > 0 && success == 0 && skipped == 0 {
+		sb.WriteString(styleWarn.Render("  All configs failed validation. Check base config, SNI/Host, path, security, and Xray availability.") + "\n")
+	}
 	if m.configDone {
 		sb.WriteString(styleHint.Render("  q/esc back to menu") + "\n")
 	}
@@ -1692,11 +1706,91 @@ func (m AppModel) configSuccessCount() int {
 func (m AppModel) configFailCount() int {
 	count := 0
 	for _, r := range m.configResults {
-		if !r.Success {
+		if !r.Success && !r.Skipped {
 			count++
 		}
 	}
 	return count
+}
+
+func (m AppModel) configSkipCount() int {
+	count := 0
+	for _, r := range m.configResults {
+		if r.Skipped {
+			count++
+		}
+	}
+	return count
+}
+
+func compactText(s string, width int) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		s = "—"
+	}
+	if width <= 0 || len(s) <= width {
+		return s
+	}
+	if width == 1 {
+		return "…"
+	}
+	return s[:width-1] + "…"
+}
+
+func shortValidationReason(err string) string {
+	err = strings.TrimSpace(strings.ToLower(err))
+	switch {
+	case err == "":
+		return "invalid config"
+	case strings.Contains(err, "parse") || strings.Contains(err, "not a") || strings.Contains(err, "missing"):
+		return "parse error"
+	case strings.Contains(err, "xray missing") || strings.Contains(err, "xray binary"):
+		return "xray missing"
+	case strings.Contains(err, "unsupported vmess"):
+		return "unsupported vmess validation"
+	case strings.Contains(err, "timeout") || strings.Contains(err, "deadline"):
+		return "timeout"
+	case strings.Contains(err, "handshake"):
+		return "handshake failed"
+	case strings.Contains(err, "no response") || strings.Contains(err, "connection refused") || strings.Contains(err, "connection reset") || strings.Contains(err, "eof"):
+		return "no response"
+	case strings.Contains(err, "invalid"):
+		return "invalid config"
+	default:
+		return err
+	}
+}
+
+func configSummaryLine(raw string) string {
+	summary, err := xraytest.ParseShareSummary(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("parsed: protocol=%s server=%s port=%d transport=%s sni=%s host=%s path=%s",
+		compactText(summary.Protocol, 12), compactText(summary.Server, 32), summary.Port,
+		compactText(summary.Transport, 12), compactText(summary.SNI, 32), compactText(summary.Host, 32), compactText(summary.Path, 32))
+}
+
+func (m AppModel) pasteConfigFromClipboard() AppModel {
+	text, err := clipboard.ReadAll()
+	if err != nil {
+		m.statusMsg = fmt.Sprintf("clipboard paste failed: %v", err)
+		return m
+	}
+	text = strings.TrimSpace(text)
+	if len(text) > 8192 {
+		text = text[:8192]
+		m.statusMsg = "pasted first 8192 characters from clipboard"
+	} else {
+		m.statusMsg = "pasted from clipboard"
+	}
+	m.configInput.SetValue(text)
+	if summary := configSummaryLine(text); summary != "" {
+		m.statusMsg = summary
+	} else if text != "" {
+		m.statusMsg = "pasted; parse error"
+	}
+	return m
 }
 
 func (m AppModel) handleScanWithConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1755,14 +1849,19 @@ func (m AppModel) handleScanWithConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.configTopNIdx++
 			}
 		}
+	case "p", "ctrl+v":
+		if !m.configScanning && !m.configDone && m.configSetupRow == 0 {
+			m = m.pasteConfigFromClipboard()
+			return m, nil
+		}
 	case "enter":
 		if !m.configScanning && !m.configDone {
-			rawURL := m.configInput.Value()
+			rawURL := strings.TrimSpace(m.configInput.Value())
 			if rawURL == "" {
 				return m, nil
 			}
-			_, err := xraytest.ParseVLESS(rawURL)
-			if err != nil {
+			if _, err := xraytest.ParseShareSummary(rawURL); err != nil {
+				m.statusMsg = fmt.Sprintf("parse error: %v", err)
 				return m, nil
 			}
 			m.configURL = rawURL
@@ -1903,7 +2002,7 @@ func (m AppModel) viewConfigSetup() string {
 		sb.WriteString(styleDim.Render(topLabel+"best IPs to validate with xray") + "\n\n")
 	}
 
-	sb.WriteString(styleHint.Render("  ↑/↓ row   ←/→ option   enter start   esc back") + "\n")
+	sb.WriteString(styleHint.Render("  ↑/↓ row   ←/→ option   p paste   ctrl+v paste when supported   enter start   esc back") + "\n")
 
 	return sb.String()
 }
@@ -2061,33 +2160,83 @@ func (m AppModel) startConfigPhase2(topIPs []*result.Result) tea.Cmd {
 }
 
 func runConfigPhase2(rawURL string, topIPs []*result.Result) {
-	cfg, err := xraytest.ParseVLESS(rawURL)
-	if err != nil {
+	summary, parseErr := xraytest.ParseShareSummary(rawURL)
+	total := len(topIPs)
+	xrayAvailable := xraytest.XrayAvailable()
+	firstErr := ""
+	defer func() {
+		writeConfigDebugLog(total, xrayAvailable, firstErr)
 		if prog != nil {
 			prog.Send(ConfigDoneMsg{})
+		}
+	}()
+
+	if parseErr != nil {
+		firstErr = fmt.Sprintf("parse error: %v", parseErr)
+		for i, r := range topIPs {
+			vr := &xraytest.ValidationResult{IP: r.IP.String(), Error: firstErr, Transport: "—"}
+			if prog != nil {
+				prog.Send(ConfigProgressMsg{Result: vr, Done: i + 1, Total: total})
+			}
+		}
+		return
+	}
+
+	if !xrayAvailable {
+		firstErr = "xray missing"
+		for i, r := range topIPs {
+			vr := &xraytest.ValidationResult{IP: r.IP.String(), Port: summary.Port, Transport: summary.Transport, Skipped: true, Error: firstErr}
+			if prog != nil {
+				prog.Send(ConfigProgressMsg{Result: vr, Done: i + 1, Total: total})
+			}
 		}
 		return
 	}
 
 	ctx := context.Background()
-	total := len(topIPs)
-
+	scheme := strings.ToLower(summary.Protocol)
 	for i, r := range topIPs {
 		ip := r.IP.String()
-		swapped := cfg.WithAddress(ip)
-		vr := xraytest.ValidateConfig(ctx, swapped, 20*time.Second)
+		vr := validateShareForIP(ctx, rawURL, scheme, ip, 20*time.Second)
+		if !vr.Success && !vr.Skipped && firstErr == "" {
+			firstErr = vr.Error
+		}
 		if prog != nil {
-			prog.Send(ConfigProgressMsg{
-				Result: vr,
-				Done:   i + 1,
-				Total:  total,
-			})
+			prog.Send(ConfigProgressMsg{Result: vr, Done: i + 1, Total: total})
 		}
 	}
+}
 
-	if prog != nil {
-		prog.Send(ConfigDoneMsg{})
+func validateShareForIP(ctx context.Context, rawURL, scheme, ip string, timeout time.Duration) *xraytest.ValidationResult {
+	switch scheme {
+	case "vless":
+		cfg, err := xraytest.ParseVLESS(rawURL)
+		if err != nil {
+			return &xraytest.ValidationResult{IP: ip, Error: fmt.Sprintf("parse error: %v", err)}
+		}
+		return xraytest.ValidateConfig(ctx, cfg.WithAddress(ip), timeout)
+	case "trojan":
+		cfg, err := xraytest.ParseTrojan(rawURL)
+		if err != nil {
+			return &xraytest.ValidationResult{IP: ip, Error: fmt.Sprintf("parse error: %v", err)}
+		}
+		copy := *cfg
+		copy.Address = ip
+		return xraytest.ValidateTrojanConfig(ctx, &copy, timeout)
+	case "vmess":
+		summary, _ := xraytest.ParseShareSummary(rawURL)
+		return &xraytest.ValidationResult{IP: ip, Port: summary.Port, Transport: summary.Transport, Skipped: true, Error: "unsupported vmess validation"}
+	default:
+		return &xraytest.ValidationResult{IP: ip, Error: "invalid config"}
 	}
+}
+
+func writeConfigDebugLog(generatedCount int, xrayAvailable bool, firstErr string) {
+	if firstErr == "" {
+		firstErr = "none"
+	}
+	content := fmt.Sprintf("generated_config_count=%d\nxray_available=%t\nfirst_error_reason=%s\n", generatedCount, xrayAvailable, firstErr)
+	_ = os.WriteFile("scan_config_debug.log", []byte(content), 0644)
 }
 
 func (m AppModel) viewEmergencyScan() string {

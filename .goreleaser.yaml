@@ -17,10 +17,10 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X github.com/matinsenpai/senpaiscanner/pkg/version.Version={{.Version}}
-      - -X github.com/matinsenpai/senpaiscanner/pkg/version.Commit={{.Commit}}
-      - -X github.com/matinsenpai/senpaiscanner/pkg/version.BuildDate={{.Date}}
-      - -X github.com/matinsenpai/senpaiscanner/pkg/version.BuiltBy=goreleaser
+      - -X github.com/official-LloydLewis/SenPaiScanner/pkg/version.Version={{.Version}}
+      - -X github.com/official-LloydLewis/SenPaiScanner/pkg/version.Commit={{.Commit}}
+      - -X github.com/official-LloydLewis/SenPaiScanner/pkg/version.BuildDate={{.Date}}
+      - -X github.com/official-LloydLewis/SenPaiScanner/pkg/version.BuiltBy=goreleaser
     goos:
       - linux
       - windows

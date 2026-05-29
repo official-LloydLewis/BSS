@@ -44,7 +44,7 @@ func ValidateConfig(ctx context.Context, cfg *VLESSConfig, timeout time.Duration
 	res := validateOnce(ctx, cfg, timeout)
 	if !res.Success && XrayAvailable() {
 		time.Sleep(500 * time.Millisecond)
-		res2 := validateOnce(ctx, ip, port, transport, timeout, build)
+		res2 := validateOnce(ctx, cfg, timeout)
 		res2.Retries = 1
 		if res2.Success {
 			return res2

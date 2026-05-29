@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -22,12 +23,15 @@ import (
 // scanCancel holds the cancel function for the active scan so the TUI can
 // abort it when the user presses esc/q.
 var scanCancel context.CancelFunc
+var scanIDCounter atomic.Int64
+
+func nextScanID() int64 { return scanIDCounter.Add(1) }
 
 // StartScanCmd builds a tea.Cmd that runs the scan engine in the background,
 // sending ResultMsg and StatsMsg messages to the Bubble Tea program.
-func StartScanCmd(cfg ScanConfig) tea.Cmd {
+func StartScanCmd(cfg ScanConfig, scanID int64) tea.Cmd {
 	return func() tea.Msg {
-		go runScan(cfg)
+		go runScan(cfg, scanID)
 		return nil
 	}
 }
@@ -43,17 +47,17 @@ func CancelScanCmd() tea.Cmd {
 }
 
 // StartTestCmd runs the test pass against a file of IPs.
-func StartTestCmd(ipFile string) tea.Cmd {
+func StartTestCmd(ipFile string, scanID int64) tea.Cmd {
 	return func() tea.Msg {
-		go runTest(ipFile)
+		go runTest(ipFile, scanID)
 		return nil
 	}
 }
 
 // StartColosCmd discovers accessible Cloudflare PoPs.
-func StartColosCmd() tea.Cmd {
+func StartColosCmd(scanID int64) tea.Cmd {
 	return func() tea.Msg {
-		go runColos()
+		go runColos(scanID)
 		return nil
 	}
 }
@@ -69,13 +73,13 @@ func SetProgram(p *tea.Program) { prog = p }
 // Background runners
 // ---------------------------------------------------------------------------
 
-func runScan(cfg ScanConfig) {
+func runScan(cfg ScanConfig, scanID int64) {
 	count, _ := strconv.Atoi(cfg.Count)
 	concurrency, _ := strconv.Atoi(cfg.Concurrency)
 	if concurrency <= 0 {
 		concurrency = 50
 	}
-	timeout := parseTimeout(cfg.Timeout, 3*time.Second)
+	timeout := parseTimeout(cfg.Timeout, 5*time.Second)
 	tries, _ := strconv.Atoi(cfg.Tries)
 	if tries <= 0 {
 		tries = 4
@@ -87,7 +91,7 @@ func runScan(cfg ScanConfig) {
 
 	mode, err := prober.ParseMode(cfg.Mode)
 	if err != nil {
-		mode = prober.ModeTLS
+		mode = prober.ModeHTTP
 	}
 
 	var extra []string
@@ -98,11 +102,11 @@ func runScan(cfg ScanConfig) {
 		}
 	}
 
-	src, err := ipsrc.New(cfg.UseV4, cfg.UseV6, extra)
+	useBuiltin := len(extra) == 0
+	src, err := ipsrc.NewWithOptions(cfg.UseV4, cfg.UseV6, extra, ipsrc.Options{UseBuiltin: useBuiltin})
 	if err != nil {
-		if prog != nil {
-			prog.Send(DoneMsg{})
-		}
+		sendError(scanID, fmt.Sprintf("Scan setup failed: %v", err))
+		sendDone(scanID)
 		return
 	}
 
@@ -131,37 +135,45 @@ func runScan(cfg ScanConfig) {
 		if w, e := output.New(cfg.OutputFile, fmt2); e == nil {
 			writer = w
 			defer writer.Close()
+		} else {
+			sendError(scanID, fmt.Sprintf("Output disabled: %v", e))
 		}
 	}
 
 	ipStream := src.Stream(ctx, count)
 	eng.Run(ctx, ipStream, func(r *result.Result) {
+		if prog != nil {
+			s := eng.Stats()
+			prog.Send(StatsMsg{ScanID: scanID, Tested: s.Tested.Load(), Healthy: s.Healthy.Load(), Failed: s.Failed.Load(), InFlight: s.InFlight.Load()})
+		}
 		if !passesColoFilter(r, coloSet) {
 			return
 		}
 		// Only healthy IPs go to the output file; writing every scanned IP
 		// would flood the file with thousands of failed probes.
 		if writer != nil && r.IsHealthy() {
-			_ = writer.Write(r)
+			if err := writer.Write(r); err != nil {
+				sendError(scanID, fmt.Sprintf("Output write failed: %v", err))
+			}
 		}
 		if prog != nil {
-			s := eng.Stats()
-			prog.Send(ResultMsg(r))
-			prog.Send(StatsMsg{s.Tested.Load(), s.Healthy.Load(), s.Failed.Load(), s.InFlight.Load()})
+			prog.Send(ResultMsg{ScanID: scanID, Result: r})
 		}
 	})
 
-	if prog != nil {
-		prog.Send(DoneMsg{})
-	}
+	sendDone(scanID)
 }
 
-func runTest(ipFile string) {
+func runTest(ipFile string, scanID int64) {
 	ips, err := loadIPs(ipFile)
-	if err != nil || len(ips) == 0 {
-		if prog != nil {
-			prog.Send(DoneMsg{})
-		}
+	if err != nil {
+		sendError(scanID, fmt.Sprintf("Test IPs failed: %v", err))
+		sendDone(scanID)
+		return
+	}
+	if len(ips) == 0 {
+		sendError(scanID, fmt.Sprintf("Test IPs failed: no valid IPs found in %s", ipFile))
+		sendDone(scanID)
 		return
 	}
 
@@ -185,22 +197,19 @@ func runTest(ipFile string) {
 	eng.RunList(ctx, ips, func(r *result.Result) {
 		if prog != nil {
 			s := eng.Stats()
-			prog.Send(ResultMsg(r))
-			prog.Send(StatsMsg{s.Tested.Load(), s.Healthy.Load(), s.Failed.Load(), s.InFlight.Load()})
+			prog.Send(ResultMsg{ScanID: scanID, Result: r})
+			prog.Send(StatsMsg{ScanID: scanID, Tested: s.Tested.Load(), Healthy: s.Healthy.Load(), Failed: s.Failed.Load(), InFlight: s.InFlight.Load()})
 		}
 	})
 
-	if prog != nil {
-		prog.Send(DoneMsg{})
-	}
+	sendDone(scanID)
 }
 
-func runColos() {
+func runColos(scanID int64) {
 	src, err := ipsrc.New(true, false, nil)
 	if err != nil {
-		if prog != nil {
-			prog.Send(ColosDoneMsg{})
-		}
+		sendError(scanID, fmt.Sprintf("Colo discovery failed: %v", err))
+		sendColosDone(scanID)
 		return
 	}
 
@@ -222,18 +231,36 @@ func runColos() {
 	ipStream := src.Stream(ctx, 300)
 
 	eng.Run(ctx, ipStream, func(r *result.Result) {
+		if prog != nil {
+			s := eng.Stats()
+			prog.Send(StatsMsg{ScanID: scanID, Tested: s.Tested.Load(), Healthy: s.Healthy.Load(), Failed: s.Failed.Load(), InFlight: s.InFlight.Load()})
+		}
 		if !r.IsHealthy() || r.Colo == "" {
 			return
 		}
 		if prog != nil {
-			s := eng.Stats()
-			prog.Send(ResultMsg(r))
-			prog.Send(StatsMsg{s.Tested.Load(), s.Healthy.Load(), s.Failed.Load(), s.InFlight.Load()})
+			prog.Send(ResultMsg{ScanID: scanID, Result: r})
 		}
 	})
 
+	sendColosDone(scanID)
+}
+
+func sendError(scanID int64, text string) {
 	if prog != nil {
-		prog.Send(ColosDoneMsg{})
+		prog.Send(ErrorMsg{ScanID: scanID, Text: text})
+	}
+}
+
+func sendDone(scanID int64) {
+	if prog != nil {
+		prog.Send(DoneMsg{ScanID: scanID})
+	}
+}
+
+func sendColosDone(scanID int64) {
+	if prog != nil {
+		prog.Send(ColosDoneMsg{ScanID: scanID})
 	}
 }
 

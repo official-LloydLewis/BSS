@@ -134,3 +134,19 @@ func TestInvalidCIDR(t *testing.T) {
 		t.Error("expected error for invalid CIDR")
 	}
 }
+
+func TestNewWithOptionsCIDROnly(t *testing.T) {
+	s, err := NewWithOptions(true, true, []string{"192.0.2.0/30"}, Options{UseBuiltin: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.v4Nets) != 1 {
+		t.Fatalf("expected exactly one v4 CIDR, got %d", len(s.v4Nets))
+	}
+	if got := s.v4Nets[0].String(); got != "192.0.2.0/30" {
+		t.Fatalf("expected custom CIDR only, got %s", got)
+	}
+	if len(s.v6Nets) != 0 {
+		t.Fatalf("expected no v6 CIDRs, got %d", len(s.v6Nets))
+	}
+}

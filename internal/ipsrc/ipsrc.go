@@ -33,13 +33,28 @@ type Source struct {
 	rng    *rand.Rand
 }
 
-// New builds a Source from the embedded Cloudflare ranges.
+// Options controls how a Source is built.
+type Options struct {
+	// UseBuiltin controls whether embedded Cloudflare ranges are loaded before
+	// any extra CIDRs are added. Set it to false when user-provided CIDRs should
+	// be treated as an exact scan scope rather than as additions to Cloudflare's
+	// full published ranges.
+	UseBuiltin bool
+}
+
+// New builds a Source from the embedded Cloudflare ranges plus optional extra
+// CIDRs.
 func New(useV4, useV6 bool, extra []string) (*Source, error) {
+	return NewWithOptions(useV4, useV6, extra, Options{UseBuiltin: true})
+}
+
+// NewWithOptions builds a Source with explicit control over built-in ranges.
+func NewWithOptions(useV4, useV6 bool, extra []string, opts Options) (*Source, error) {
 	s := &Source{
 		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
-	if useV4 {
+	if opts.UseBuiltin && useV4 {
 		nets, err := parseLines(builtinV4)
 		if err != nil {
 			return nil, err
@@ -47,7 +62,7 @@ func New(useV4, useV6 bool, extra []string) (*Source, error) {
 		s.v4Nets = nets
 	}
 
-	if useV6 {
+	if opts.UseBuiltin && useV6 {
 		nets, err := parseLines(builtinV6)
 		if err != nil {
 			return nil, err

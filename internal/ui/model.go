@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/matinsenpai/senpaiscanner/internal/banner"
+	"github.com/matinsenpai/senpaiscanner/internal/config"
 	"github.com/matinsenpai/senpaiscanner/internal/result"
 )
 
@@ -20,16 +22,28 @@ import (
 // ---------------------------------------------------------------------------
 
 // ResultMsg carries a completed probe result from the engine.
-type ResultMsg = *result.Result
+type ResultMsg struct {
+	ScanID int64
+	Result *result.Result
+}
 
 // StatsMsg carries live engine counters.
-type StatsMsg struct{ Tested, Healthy, Failed, InFlight int64 }
+type StatsMsg struct {
+	ScanID                            int64
+	Tested, Healthy, Failed, InFlight int64
+}
 
 // DoneMsg signals the scan has finished.
-type DoneMsg struct{}
+type DoneMsg struct{ ScanID int64 }
+
+// ErrorMsg carries a user-visible background task error.
+type ErrorMsg struct {
+	ScanID int64
+	Text   string
+}
 
 // ColosDoneMsg signals the colo discovery finished.
-type ColosDoneMsg struct{}
+type ColosDoneMsg struct{ ScanID int64 }
 
 // tickMsg drives banner animation and stat refresh.
 type tickMsg time.Time
@@ -101,14 +115,14 @@ type ScanConfig struct {
 
 func defaultScanConfig() ScanConfig {
 	return ScanConfig{
-		Count:       "500",
-		Concurrency: "50",
-		Timeout:     "5s",
-		Tries:       "4",
-		Port:        "443",
-		Mode:        "http",
-		UseV4:       true,
-		UseV6:       false,
+		Count:       strconv.Itoa(config.ScanDefaults.Count),
+		Concurrency: strconv.Itoa(config.ScanDefaults.Concurrency),
+		Timeout:     config.ScanDefaults.Timeout.String(),
+		Tries:       strconv.Itoa(config.ScanDefaults.Tries),
+		Port:        strconv.Itoa(config.ScanDefaults.Port),
+		Mode:        config.ScanDefaults.Mode,
+		UseV4:       config.ScanDefaults.UseV4,
+		UseV6:       config.ScanDefaults.UseV6,
 	}
 }
 
@@ -183,13 +197,14 @@ type AppModel struct {
 	modeIdx    int
 
 	// live scan state
-	scanResults []*result.Result
-	sortBy      result.SortBy
-	sortIdx     int
-	scanStats   StatsMsg
-	scanDone    bool
-	scanStarted time.Time
-	scanTotal   int
+	activeScanID int64
+	scanResults  []*result.Result
+	sortBy       result.SortBy
+	sortIdx      int
+	scanStats    StatsMsg
+	scanDone     bool
+	scanStarted  time.Time
+	scanTotal    int
 
 	// colos
 	colosResults []*result.Result
@@ -268,8 +283,8 @@ func modeIndex(mode string) int {
 func (m *AppModel) buildFormInputs() {
 	fields := []struct{ placeholder, value string }{
 		{"count (default 500)", m.scanCfg.Count},
-		{"concurrency (default 100)", m.scanCfg.Concurrency},
-		{"timeout (default 3s)", m.scanCfg.Timeout},
+		{"concurrency (default 50)", m.scanCfg.Concurrency},
+		{"timeout (default 5s)", m.scanCfg.Timeout},
 		{"tries per IP (default 4)", m.scanCfg.Tries},
 		{"port (default 443)", m.scanCfg.Port},
 		{"CIDR filter (e.g. 104.16.0.0/13, empty = all CF)", m.scanCfg.CIDR},
@@ -324,24 +339,39 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case ResultMsg:
+		if msg.ScanID != m.activeScanID || msg.Result == nil {
+			return m, nil
+		}
 		if m.page == PageLiveColos {
-			m.colosResults = append(m.colosResults, msg)
+			m.colosResults = append(m.colosResults, msg.Result)
 		} else {
-			m.scanResults = append(m.scanResults, msg)
+			m.scanResults = append(m.scanResults, msg.Result)
 			result.Sort(m.scanResults, m.sortBy)
 		}
 		return m, nil
 
 	case StatsMsg:
-		m.scanStats = msg
+		if msg.ScanID == m.activeScanID {
+			m.scanStats = msg
+		}
+		return m, nil
+
+	case ErrorMsg:
+		if msg.ScanID == m.activeScanID {
+			m.statusMsg = msg.Text
+		}
 		return m, nil
 
 	case DoneMsg:
-		m.scanDone = true
+		if msg.ScanID == m.activeScanID {
+			m.scanDone = true
+		}
 		return m, nil
 
 	case ColosDoneMsg:
-		m.colosDone = true
+		if msg.ScanID == m.activeScanID {
+			m.colosDone = true
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -407,24 +437,30 @@ func (m AppModel) selectMenuItem() (tea.Model, tea.Cmd) {
 		m.quickCustomInput.SetValue("")
 		m.quickCustomInput.Blur()
 		m.scanCfg = defaultScanConfig() // clear any stale custom values
+		m.statusMsg = ""
 		m.page = PageQuickScanCount
 		return m, textinput.Blink
 	case menuCustomScan:
+		m.statusMsg = ""
 		m.buildFormInputs()
 		m.page = PageScanConfig
 	case menuTestIPs:
-		m.statusMsg = "  Place IPs in 'ips.txt' (one per line) then press Enter"
+		m.statusMsg = "Place IPs in 'ips.txt' (one per line) before selecting Test IPs"
+		m.activeScanID = nextScanID()
 		m.scanResults = nil
 		m.scanDone = false
-		m.scanStats = StatsMsg{}
+		m.scanStats = StatsMsg{ScanID: m.activeScanID}
 		m.scanStarted = time.Now()
+		m.scanTotal = 0
 		m.page = PageLiveScan
-		return m, StartTestCmd("ips.txt")
+		return m, StartTestCmd("ips.txt", m.activeScanID)
 	case menuColos:
+		m.activeScanID = nextScanID()
 		m.colosResults = nil
 		m.colosDone = false
+		m.scanStats = StatsMsg{ScanID: m.activeScanID}
 		m.page = PageLiveColos
-		return m, StartColosCmd()
+		return m, StartColosCmd(m.activeScanID)
 	case menuAbout:
 		m.page = PageAbout
 	case menuQuit:
@@ -639,20 +675,19 @@ func (m AppModel) launchQuickScan() (tea.Model, tea.Cmd) {
 		cfg.Timeout = m.scanCfg.Timeout
 	}
 
-	// Auto-save healthy IPs to a timestamped txt file in the current directory.
-	cfg.OutputFile = fmt.Sprintf("results_%s.txt", time.Now().Format("20060102_150405"))
-
 	m.scanCfg = cfg
+	m.activeScanID = nextScanID()
+	m.statusMsg = ""
 	m.scanResults = nil
 	m.scanDone = false
-	m.scanStats = StatsMsg{}
+	m.scanStats = StatsMsg{ScanID: m.activeScanID}
 	m.scanStarted = time.Now()
 	n, _ := fmt.Sscanf(cfg.Count, "%d", &m.scanTotal)
 	if n == 0 {
 		m.scanTotal = 0
 	}
 	m.page = PageLiveScan
-	return m, StartScanCmd(cfg)
+	return m, StartScanCmd(cfg, m.activeScanID)
 }
 
 func (m AppModel) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -693,12 +728,18 @@ func (m AppModel) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scanCfg.UseV6 = !m.scanCfg.UseV6
 	case "enter":
 		m.saveScanConfig()
+		m.activeScanID = nextScanID()
+		m.statusMsg = ""
 		m.scanResults = nil
 		m.scanDone = false
-		m.scanStats = StatsMsg{}
+		m.scanStats = StatsMsg{ScanID: m.activeScanID}
 		m.scanStarted = time.Now()
+		n, _ := fmt.Sscanf(m.scanCfg.Count, "%d", &m.scanTotal)
+		if n == 0 {
+			m.scanTotal = 0
+		}
 		m.page = PageLiveScan
-		return m, StartScanCmd(m.scanCfg)
+		return m, StartScanCmd(m.scanCfg, m.activeScanID)
 	}
 	return m.updateFormInputs(msg)
 }

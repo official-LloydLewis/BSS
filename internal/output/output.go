@@ -24,7 +24,7 @@ const (
 // DetectFormat infers the output format from the file extension.
 func DetectFormat(path string) Format {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".json":
+	case ".json", ".jsonl":
 		return FormatJSON
 	case ".txt":
 		return FormatTXT

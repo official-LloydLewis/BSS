@@ -17,11 +17,11 @@ var ScanDefaults = struct {
 	Top         int
 }{
 	Count:       500,
-	Concurrency: 100,
-	Timeout:     3 * time.Second,
+	Concurrency: 50,
+	Timeout:     5 * time.Second,
 	Tries:       4,
 	Port:        443,
-	Mode:        "tls",
+	Mode:        "http",
 	UseV4:       true,
 	UseV6:       false,
 	Top:         10,

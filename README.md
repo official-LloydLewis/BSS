@@ -33,7 +33,7 @@ The scanner:
 - Measures latency, packet loss, jitter, and (in HTTP mode) a small download throughput sample
 - Identifies the colo (Cloudflare PoP) behind each IP via `/cdn-cgi/trace` (with `CF-Ray` fallback)
 - Shows live results in a color-coded table; after a scan, a **Results** screen lists the top healthy IPs
-- Writes **CSV, JSON, or TXT** only when you set an output path in **Custom Scan** (other modes are on-screen only)
+- Writes **CSV, JSON Lines, or TXT** only when you set an output path in **Custom Scan** (other modes are on-screen only)
 
 ---
 
@@ -107,7 +107,7 @@ Everything else is inside the TUI — there are no scan-related CLI flags.
 #### Quick Scan
 Opens a three-row setup screen. Use `↑/↓` to move between rows and `←/→` to pick a preset.
 
-**Enter on a preset launches the scan immediately** (you do not need to visit every row). Workers and timeout use whatever is currently selected on those rows — on first open the defaults are **100** workers and **3s** timeout. Choose **Custom** on a row to type your own value; after the last row, Enter starts the scan.
+**Enter on a preset launches the scan immediately** (you do not need to visit every row). Workers and timeout use whatever is currently selected on those rows — on first open the defaults are **50** workers and **5s** timeout. Choose **Custom** on a row to type your own value; after the last row, Enter starts the scan.
 
 **Count** — how many IPs to probe:
 
@@ -122,8 +122,8 @@ Opens a three-row setup screen. Use `↑/↓` to move between rows and `←/→`
 
 | Preset | Notes |
 |--------|-------|
-| **50** | Safe for slow or lossy lines; won't overwhelm limited bandwidth |
-| **100** | Default — good balance on most connections |
+| **50** | Default — safe for slow or lossy lines; won't overwhelm limited bandwidth |
+| **100** | Balanced — good on most connections |
 | **200** | Faster on stable, low-latency networks |
 | **Custom** | Any integer; values above 500 rarely help and may cause OS errors |
 
@@ -132,11 +132,11 @@ Opens a three-row setup screen. Use `↑/↓` to move between rows and `←/→`
 | Preset | Notes |
 |--------|-------|
 | **2s** | Aggressive — good for fast networks; drops slow IPs quickly |
-| **3s** | Default — works well on most restricted networks |
-| **5s** | Relaxed — use this if you see high loss counts or many timeouts |
+| **3s** | Balanced — works well on many restricted networks |
+| **5s** | Default — relaxed for high loss counts or many timeouts |
 | **Custom** | Any Go duration string: `4s`, `1500ms`, `8s` |
 
-All other settings stay at defaults: HTTP validation mode, port 443, 4 tries per IP, and a small `speed.cloudflare.com` download sample for ranking real data transfer.
+All other settings stay at defaults: HTTP validation mode, port 443, 4 tries per IP, and a small 64 KiB `speed.cloudflare.com` download sample for ranking real data transfer.
 
 #### Custom Scan
 A form where you configure:
@@ -144,12 +144,12 @@ A form where you configure:
 | Field | Default | Notes |
 |---|---|---|
 | Count | 500 | IPs to probe; 0 = unlimited |
-| Workers | 100 | parallel goroutines |
-| Timeout | 3s | per-probe deadline |
+| Workers | 50 | parallel goroutines |
+| Timeout | 5s | per-probe deadline |
 | Tries | 4 | probes per IP (for loss/jitter) |
 | Port | 443 | 443 or 80 |
-| CIDR | (all CF) | e.g. `104.16.0.0/13` |
-| Output | (none) | `.csv`, `.json`, or `.txt` |
+| CIDR | (all CF) | e.g. `104.16.0.0/13`; when set, scan only the entered CIDR range(s) instead of all built-in Cloudflare ranges |
+| Output | (none) | `.csv`, `.json`, `.jsonl`, or `.txt` |
 | Colo filter | (all) | e.g. `FRA,AMS` |
 | SNI | (empty) | override hostname; empty = rotate (TCP/TLS) or `speed.cloudflare.com` (HTTP) |
 | Mode | HTTP | `http` (or `https`), `tls`, or `tcp` — cycle with **Ctrl+← / Ctrl+→** |
@@ -157,7 +157,7 @@ A form where you configure:
 
 Navigate fields with Tab / Shift+Tab (or ↑/↓). Press Enter to start. Timeout accepts Go durations like `1500ms` or `5s`; a plain number is treated as seconds.
 
-Set **Output** to a path ending in `.csv`, `.json`, or `.txt` to stream results to disk during the scan. Quick Scan, Test IPs, and Discover Colos do not write files.
+Set **Output** to a path ending in `.csv`, `.json`, `.jsonl`, or `.txt` to stream results to disk during the scan. Quick Scan, Test IPs, and Discover Colos do not write files.
 
 #### Test IPs
 Put IPs in `ips.txt` in the **current working directory** (one per line, or CSV with IP in the first column) **before** you select this menu item. The scan **starts as soon as you choose Test IPs** from the menu.
@@ -195,10 +195,12 @@ ip,loss_pct,avg_ms,min_ms,max_ms,jitter_ms,download_kbps,speed_tested,colo,tls_o
 104.21.14.53,0.0,87.40,82.10,93.60,4.20,540.8,true,FRA,true,200
 ```
 
-**JSON** (`.json`):
+**JSON Lines** (`.json` / `.jsonl`):
 ```json
-[{"ip":"104.21.14.53","loss_pct":0,"avg_ms":87.4,"download_kbps":540.8,"speed_tested":true,"colo":"FRA","tls_ok":true}]
+{"ip":"104.21.14.53","loss_pct":0,"avg_ms":87.4,"download_kbps":540.8,"speed_tested":true,"colo":"FRA","tls_ok":true}
+{"ip":"104.21.14.54","loss_pct":0,"avg_ms":91.2,"download_kbps":512.3,"speed_tested":true,"colo":"FRA","tls_ok":true}
 ```
+Each line is a standalone JSON object; the file is not wrapped in an array so results can be appended safely while a scan is running.
 
 **TXT** (`.txt`):
 ```
@@ -217,7 +219,7 @@ ip,loss_pct,avg_ms,min_ms,max_ms,jitter_ms,download_kbps,speed_tested,colo,tls_o
 
 **Filter by colo.** If your proxy server is physically in one city, restrict to that colo so you're not routing traffic around the world: set colo filter to `FRA` for Frankfurt, `AMS` for Amsterdam, and so on.
 
-**SNI.** In Custom Scan, leave SNI empty for automatic behavior: **TCP/TLS** rotates hostnames per try; **HTTP** (Quick Scan default) always uses `speed.cloudflare.com`. Override SNI if you need a specific hostname (especially for TLS/TCP on filtered networks).
+**SNI.** In Custom Scan, leave SNI empty for automatic behavior: **TCP/TLS** rotates hostnames per try; **HTTP** (Quick/Custom Scan default) always uses `speed.cloudflare.com`. Override SNI if you need a specific hostname (especially for TLS/TCP on filtered networks).
 
 **Final proxy validation still matters.** The strongest test is replacing the address in your VLESS/VMess/Trojan config and testing through Xray/V2Ray, because DPI behavior can depend on transport, SNI, path, ALPN, and fragmentation settings.
 
@@ -235,7 +237,7 @@ SenPai Scanner doesn't run a proxy or manage connections. It gives you a sorted 
 Enable it in Custom Scan with the F3 toggle. IPv6 availability on Iranian ISPs is inconsistent but it's there if you need it.
 
 **The scan is taking forever.**
-Lower workers and raise timeout: set concurrency to 30 and timeout to 8s. The default 3s is aggressive for high-latency connections.
+Lower workers and raise timeout: set concurrency to 30 and timeout to 8s. The default 5s is conservative for high-latency connections.
 
 **Where do the IP ranges come from?**
 Embedded directly from Cloudflare's official published lists (`cloudflare.com/ips-v4`, `cloudflare.com/ips-v6`). The binary ships with a snapshot; there's no auto-update mechanism by design, since the ranges rarely change.

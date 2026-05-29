@@ -15,9 +15,10 @@ import (
 
 // Config controls engine behaviour.
 type Config struct {
-	Concurrency int
-	RateLimit   float64 // probes per second, <=0 means unlimited
-	ProbeConfig prober.Config
+	Concurrency      int
+	RateLimit        float64 // probes per second, <=0 means unlimited
+	StopAfterHealthy int     // cancel once this many healthy results are found; <=0 disables
+	ProbeConfig      prober.Config
 }
 
 // Stats exposes real-time counters.
@@ -31,6 +32,13 @@ type Stats struct {
 // ResultFunc is called for every completed probe result. It is invoked from
 // worker goroutines, so implementations must be goroutine-safe.
 type ResultFunc func(*result.Result)
+
+type cancelKey struct{}
+
+// WithStopCancel attaches a cancel function that Engine can call when StopAfterHealthy is reached.
+func WithStopCancel(ctx context.Context, cancel context.CancelFunc) context.Context {
+	return context.WithValue(ctx, cancelKey{}, cancel)
+}
 
 // Engine orchestrates a pool of prober goroutines.
 type Engine struct {
@@ -80,7 +88,12 @@ func (e *Engine) Run(ctx context.Context, src <-chan net.IP, fn ResultFunc) {
 				}
 			}
 
-			sem <- struct{}{}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				wg.Wait()
+				return
+			}
 			e.stats.InFlight.Add(1)
 			wg.Add(1)
 
@@ -94,7 +107,12 @@ func (e *Engine) Run(ctx context.Context, src <-chan net.IP, fn ResultFunc) {
 				r := prober.Probe(ctx, ip, e.cfg.ProbeConfig)
 				e.stats.Tested.Add(1)
 				if r.IsHealthy() {
-					e.stats.Healthy.Add(1)
+					healthy := e.stats.Healthy.Add(1)
+					if e.cfg.StopAfterHealthy > 0 && healthy >= int64(e.cfg.StopAfterHealthy) {
+						if canceler, ok := ctx.Value(cancelKey{}).(context.CancelFunc); ok {
+							canceler()
+						}
+					}
 				} else {
 					e.stats.Failed.Add(1)
 				}

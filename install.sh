@@ -84,7 +84,20 @@ get_installed_version() {
 
     VERSION_OUTPUT=$("$BINARY_PATH" --version 2>/dev/null || true)
 
-    printf "%s\n" "$VERSION_OUTPUT" | grep -oP 'v[0-9]+(?:\.[0-9A-Za-z_.-]*)*' | head -n1 || true
+    VERSION=$(printf "%s\n" "$VERSION_OUTPUT" | grep -oP 'v?[0-9]+(?:\.[0-9A-Za-z_.-]*)*' | head -n1 || true)
+
+    if [ -z "$VERSION" ]; then
+        return
+    fi
+
+    case "$VERSION" in
+        v*)
+            printf "%s\n" "$VERSION"
+            ;;
+        *)
+            printf "v%s\n" "$VERSION"
+            ;;
+    esac
 }
 
 TAG_RAW=$(get_latest_release || true)

@@ -83,6 +83,12 @@ var (
 	styleGood = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#27AE60")).Bold(true)
 
+	styleExcellent = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#00E5FF")).Bold(true)
+
+	styleVersion = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#C46A1B")).Faint(true)
+
 	styleWarn = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#F39C12"))
 
@@ -275,6 +281,12 @@ const (
 )
 
 var modes = []string{"tls", "tcp", "http"}
+
+const (
+	excellentLatencyThreshold = 500 * time.Millisecond
+	excellentJitterThreshold  = 80 * time.Millisecond
+	excellentSpeedThreshold   = 50 * 1024 // bytes/sec
+)
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -998,7 +1010,7 @@ func (m AppModel) viewHome() string {
 	sb.WriteRune('\n')
 
 	// Version — keep newlines outside styled output; lipgloss pads blank lines with spaces.
-	sb.WriteString(styleDim.Render(fmt.Sprintf("  v%s", m.version)))
+	sb.WriteString(styleVersion.Render("  " + m.versionLabel()))
 	sb.WriteString("\n\n")
 
 	// Menu
@@ -1034,9 +1046,7 @@ func (m AppModel) viewQuickScanCount() string {
 
 	separator := fmt.Sprintf("  %v\n\n", strings.Repeat("─", 64))
 
-	sb.WriteString(banner.Render(m.bannerFrame / 2))
-	sb.WriteRune('\n')
-	sb.WriteString(styleTitle.Render("  ⚡  Quick Scan Setup\n"))
+	sb.WriteString(styleTitle.Render("\n  ⚡  Quick Scan Setup\n"))
 	sb.WriteString(separator)
 
 	type rowDef struct {
@@ -1227,9 +1237,9 @@ func (m AppModel) viewLiveScan() string {
 	))
 
 	// Table header
-	hdr := fmt.Sprintf("  %-18s  %7s  %9s  %8s  %9s  %5s  %-6s",
-		"IP", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
-	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 72))))
+	hdr := fmt.Sprintf("  %-18s  %-9s  %7s  %9s  %8s  %9s  %5s  %-6s",
+		"IP", "QUALITY", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
+	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 84))))
 
 	maxRows := m.height - 14
 	if maxRows < 3 {
@@ -1241,29 +1251,21 @@ func (m AppModel) viewLiveScan() string {
 	}
 
 	for _, r := range rows {
-		tlsIcon := styleBad.Render("✗")
+		tlsIcon := "✗"
 		if r.TLSOk {
-			tlsIcon = styleGood.Render("✓")
+			tlsIcon = "✓"
 		}
 		colo := r.Colo
 		if colo == "" {
 			colo = "—"
 		}
-		line := fmt.Sprintf("  %-18s  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
-			r.IP.String(), r.Loss(),
+		line := fmt.Sprintf("  %-18s  %-9s  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
+			r.IP.String(), qualityLabel(r), r.Loss(),
 			float64(r.Avg().Milliseconds()),
 			float64(r.Jitter().Milliseconds()),
 			r.Throughput/1024,
 			tlsIcon, colo)
-
-		switch {
-		case r.IsHealthy() && r.Loss() == 0 && r.Avg().Milliseconds() < 200:
-			sb.WriteString(fmt.Sprintf("%s\n", styleGood.Render(line)))
-		case !r.IsHealthy():
-			sb.WriteString(fmt.Sprintf("%s\n", styleBad.Render(line)))
-		default:
-			sb.WriteString(fmt.Sprintf("%s\n", styleWarn.Render(line)))
-		}
+		sb.WriteString(qualityStyle(r).Render(line) + "\n")
 	}
 
 	sb.WriteRune('\n')
@@ -1293,9 +1295,9 @@ func (m AppModel) viewResults() string {
 	if len(top) == 0 {
 		sb.WriteString(styleWarn.Render("  No healthy IPs found. Try raising timeout, lowering workers, or using a different SNI.\n"))
 	} else {
-		hdr := fmt.Sprintf("  %-18s  %7s  %9s  %8s  %9s  %5s  %-6s",
-			"IP", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
-		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 72))))
+		hdr := fmt.Sprintf("  %-5s  %-18s  %-9s  %7s  %9s  %8s  %9s  %5s  %-6s",
+			"RANK", "IP", "QUALITY", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
+		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 92))))
 
 		for i, r := range top {
 			tlsIcon := "✗"
@@ -1306,14 +1308,13 @@ func (m AppModel) viewResults() string {
 			if colo == "" {
 				colo = "—"
 			}
-			rank := styleAccent.Render(fmt.Sprintf(" %2d. ", i+1))
-			line := fmt.Sprintf("%-18s  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
-				r.IP.String(), r.Loss(),
+			line := fmt.Sprintf("  %2d.   %-18s  %-9s  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
+				i+1, r.IP.String(), qualityLabel(r), r.Loss(),
 				float64(r.Avg().Milliseconds()),
 				float64(r.Jitter().Milliseconds()),
 				r.Throughput/1024,
 				tlsIcon, colo)
-			sb.WriteString(fmt.Sprintf("%s%s\n", rank, styleGood.Render(line)))
+			sb.WriteString(qualityStyle(r).Render(line) + "\n")
 		}
 	}
 
@@ -1383,7 +1384,7 @@ func (m AppModel) viewLiveColos() string {
 		sb.WriteString(styleGood.Render("  ✓ Discovery complete\n\n"))
 	}
 
-	PrintColoTableBuf(&sb, m.colosResults)
+	PrintColoTableBufWithWidth(&sb, m.colosResults, m.width)
 
 	sb.WriteRune('\n')
 	sb.WriteString(styleHint.Render("  q/esc → home menu"))
@@ -1398,8 +1399,8 @@ func (m AppModel) viewAbout() string {
 	var sb strings.Builder
 	sb.WriteString(banner.Render(m.bannerFrame / 2))
 	sb.WriteRune('\n')
-	sb.WriteString(styleTitle.Render("  SenPai Scanner\n"))
-	sb.WriteString(styleDim.Render(fmt.Sprintf("  version %s", m.version)))
+	sb.WriteString(styleTitle.Render("  SenPai Scanner "))
+	sb.WriteString(styleVersion.Render(m.versionLabel()))
 	sb.WriteString("\n\n")
 	sb.WriteString(styleNormal.Render("  A Cloudflare IP scanner built for high-latency, restricted networks."))
 	sb.WriteRune('\n')
@@ -1429,10 +1430,10 @@ func PrintTable(results []*result.Result, top int) {
 		sorted = sorted[:top]
 	}
 
-	hdr := fmt.Sprintf("  %-18s  %7s  %9s  %8s  %9s  %4s  %-5s",
-		"IP", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
+	hdr := fmt.Sprintf("  %-18s  %-9s  %7s  %9s  %8s  %9s  %4s  %-5s",
+		"IP", "QUALITY", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
 	fmt.Println(hdr)
-	fmt.Println("  " + strings.Repeat("─", 72))
+	fmt.Println("  " + strings.Repeat("─", 84))
 	for _, r := range sorted {
 		tls := "✗"
 		if r.TLSOk {
@@ -1442,8 +1443,8 @@ func PrintTable(results []*result.Result, top int) {
 		if colo == "" {
 			colo = "—"
 		}
-		fmt.Printf("  %-18s  %6.1f%%  %9.2f  %8.2f  %9.1f  %4s  %-5s\n",
-			r.IP.String(), r.Loss(),
+		fmt.Printf("  %-18s  %-9s  %6.1f%%  %9.2f  %8.2f  %9.1f  %4s  %-5s\n",
+			r.IP.String(), qualityLabel(r), r.Loss(),
 			float64(r.Avg().Milliseconds()),
 			float64(r.Jitter().Milliseconds()),
 			r.Throughput/1024,
@@ -1464,6 +1465,12 @@ func SimpleProgress(tested, healthy, total int64) {
 
 // PrintColoTableBuf writes a colo summary into sb.
 func PrintColoTableBuf(sb *strings.Builder, results []*result.Result) {
+	PrintColoTableBufWithWidth(sb, results, 80)
+}
+
+// PrintColoTableBufWithWidth writes a colo summary into sb while keeping the
+// best-IP column compact enough for narrow terminal widths.
+func PrintColoTableBufWithWidth(sb *strings.Builder, results []*result.Result, width int) {
 	type cs struct {
 		count  int
 		avgSum int64
@@ -1508,12 +1515,17 @@ func PrintColoTableBuf(sb *strings.Builder, results []*result.Result) {
 			rows[j], rows[j-1] = rows[j-1], rows[j]
 		}
 	}
-	sb.WriteString(styleHeader.Render(fmt.Sprintf("  %-6s  %6s  %9s  %9s  %s\n",
-		"COLO", "COUNT", "AVG(ms)", "BEST(ms)", "BEST IP")))
-	sb.WriteString(styleSep.Render("  " + strings.Repeat("─", 52) + "\n"))
+	ipWidth := minInt(39, width-42)
+	if ipWidth < 15 {
+		ipWidth = 15
+	}
+	separatorWidth := 41 + ipWidth
+	sb.WriteString(styleHeader.Render(fmt.Sprintf("  %-6s  %6s  %9s  %9s  %-*s\n",
+		"COLO", "COUNT", "AVG(ms)", "BEST(ms)", ipWidth, "BEST IP")))
+	sb.WriteString(styleSep.Render("  " + strings.Repeat("─", separatorWidth) + "\n"))
 	for _, r := range rows {
-		line := fmt.Sprintf("  %-6s  %6d  %9.2f  %9d  %s\n",
-			r.colo, r.count, r.avgMs, r.bestMs, r.bestIP)
+		line := fmt.Sprintf("  %-6s  %6d  %9.2f  %9d  %-*s\n",
+			r.colo, r.count, r.avgMs, r.bestMs, ipWidth, compactText(r.bestIP, ipWidth))
 		sb.WriteString(styleGood.Render(line))
 	}
 }
@@ -1546,6 +1558,46 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m AppModel) versionLabel() string {
+	version := strings.TrimSpace(m.version)
+	if version == "" {
+		version = "4.0.0"
+	}
+	version = strings.TrimPrefix(strings.TrimPrefix(version, "v"), "V")
+	return "V" + version
+}
+
+func qualityLabel(r *result.Result) string {
+	if isExcellentIP(r) {
+		return "EXCELLENT"
+	}
+	if r != nil && r.IsHealthy() {
+		return "OK"
+	}
+	return "FAIL"
+}
+
+func isExcellentIP(r *result.Result) bool {
+	if r == nil || !r.IsHealthy() {
+		return false
+	}
+	return r.Loss() == 0 &&
+		r.Avg() > 0 && r.Avg() < excellentLatencyThreshold &&
+		r.Jitter() < excellentJitterThreshold &&
+		r.SpeedTested && r.Throughput > excellentSpeedThreshold
+}
+
+func qualityStyle(r *result.Result) lipgloss.Style {
+	switch {
+	case isExcellentIP(r):
+		return styleExcellent
+	case r != nil && r.IsHealthy():
+		return styleGood
+	default:
+		return styleBad
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1786,7 +1838,7 @@ func (m AppModel) pasteConfigFromClipboard() AppModel {
 	}
 	m.configInput.SetValue(text)
 	if summary := configSummaryLine(text); summary != "" {
-		m.statusMsg = summary
+		m.statusMsg = "pasted config — " + summary
 	} else if text != "" {
 		m.statusMsg = "pasted; parse error"
 	}
@@ -1850,7 +1902,9 @@ func (m AppModel) handleScanWithConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "p", "ctrl+v":
-		if !m.configScanning && !m.configDone && m.configSetupRow == 0 {
+		if !m.configScanning && !m.configDone {
+			m.configSetupRow = 0
+			m.configInput.Focus()
 			m = m.pasteConfigFromClipboard()
 			return m, nil
 		}

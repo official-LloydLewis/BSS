@@ -4,7 +4,7 @@ import "fmt"
 
 // These variables are injected at build time via -ldflags.
 var (
-	Version   = "dev"
+	Version   = "4.0.0"
 	Commit    = "none"
 	BuildDate = "unknown"
 	BuiltBy   = "source"

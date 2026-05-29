@@ -6,24 +6,62 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/matinsenpai/senpaiscanner/internal/configgen"
 	"github.com/matinsenpai/senpaiscanner/internal/engine"
+	"github.com/matinsenpai/senpaiscanner/internal/history"
 	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
 	"github.com/matinsenpai/senpaiscanner/internal/output"
 	"github.com/matinsenpai/senpaiscanner/internal/prober"
 	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
 )
 
-// scanCancel holds the cancel function for the active scan so the TUI can
-// abort it when the user presses esc/q.
-var scanCancel context.CancelFunc
+type scanManager struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+func (s *scanManager) SetCancel(cancel context.CancelFunc) {
+	s.mu.Lock()
+	s.cancel = cancel
+	s.mu.Unlock()
+}
+
+func (s *scanManager) Cancel() {
+	s.mu.Lock()
+	cancel := s.cancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *scanManager) Clear(cancel context.CancelFunc) {
+	s.mu.Lock()
+	if sameCancel(s.cancel, cancel) {
+		s.cancel = nil
+	}
+	s.mu.Unlock()
+}
+
+var scans scanManager
 var scanIDCounter atomic.Int64
+
+func sameCancel(a, b context.CancelFunc) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
+}
 
 func nextScanID() int64 { return scanIDCounter.Add(1) }
 
@@ -39,9 +77,7 @@ func StartScanCmd(cfg ScanConfig, scanID int64) tea.Cmd {
 // CancelScanCmd cancels the running scan.
 func CancelScanCmd() tea.Cmd {
 	return func() tea.Msg {
-		if scanCancel != nil {
-			scanCancel()
-		}
+		scans.Cancel()
 		return nil
 	}
 }
@@ -111,11 +147,18 @@ func runScan(cfg ScanConfig, scanID int64) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	scanCancel = cancel
+	ctx = engine.WithStopCancel(ctx, cancel)
+	scans.SetCancel(cancel)
+	defer scans.Clear(cancel)
 	defer cancel()
 
+	engineStopAfter := cfg.StopAfterHealthy
+	if strings.TrimSpace(cfg.ColoFilter) != "" {
+		engineStopAfter = 0
+	}
 	engCfg := engine.Config{
-		Concurrency: concurrency,
+		Concurrency:      concurrency,
+		StopAfterHealthy: engineStopAfter,
 		ProbeConfig: prober.Config{
 			Port:       port,
 			Mode:       mode,
@@ -123,16 +166,23 @@ func runScan(cfg ScanConfig, scanID int64) {
 			Timeout:    timeout,
 			SNI:        cfg.SNI,
 			SpeedBytes: speedSampleForMode(mode),
+			WSTest:     false,
 		},
 	}
 	eng := engine.New(engCfg)
 
 	coloSet := buildColoSet(cfg.ColoFilter)
+	var healthyForStop atomic.Int64
+	var resultsMu sync.Mutex
+	var goodIPs []string
+	var badIPs []string
 
 	var writer *output.Writer
 	if cfg.OutputFile != "" {
-		fmt2 := output.DetectFormat(cfg.OutputFile)
-		if w, e := output.New(cfg.OutputFile, fmt2); e == nil {
+		fmt2, e := output.DetectFormat(cfg.OutputFile)
+		if e != nil {
+			sendError(scanID, fmt.Sprintf("Output disabled: %v", e))
+		} else if w, e := output.New(cfg.OutputFile, fmt2); e == nil {
 			writer = w
 			defer writer.Close()
 		} else {
@@ -141,6 +191,9 @@ func runScan(cfg ScanConfig, scanID int64) {
 	}
 
 	ipStream := src.Stream(ctx, count)
+	if cfg.Emergency {
+		ipStream = emergencyIPStream(ctx, src, count)
+	}
 	eng.Run(ctx, ipStream, func(r *result.Result) {
 		if prog != nil {
 			s := eng.Stats()
@@ -148,6 +201,18 @@ func runScan(cfg ScanConfig, scanID int64) {
 		}
 		if !passesColoFilter(r, coloSet) {
 			return
+		}
+		if r.IsHealthy() {
+			resultsMu.Lock()
+			goodIPs = append(goodIPs, r.IP.String())
+			resultsMu.Unlock()
+			if cfg.StopAfterHealthy > 0 && healthyForStop.Add(1) >= int64(cfg.StopAfterHealthy) {
+				cancel()
+			}
+		} else if cfg.Emergency {
+			resultsMu.Lock()
+			badIPs = append(badIPs, r.IP.String())
+			resultsMu.Unlock()
 		}
 		// Only healthy IPs go to the output file; writing every scanned IP
 		// would flood the file with thousands of failed probes.
@@ -161,6 +226,13 @@ func runScan(cfg ScanConfig, scanID int64) {
 		}
 	})
 
+	if cfg.Emergency {
+		resultsMu.Lock()
+		goodCopy := append([]string(nil), goodIPs...)
+		badCopy := append([]string(nil), badIPs...)
+		resultsMu.Unlock()
+		runEmergencyExports(scanID, cfg, goodCopy, badCopy, port)
+	}
 	sendDone(scanID)
 }
 
@@ -178,7 +250,8 @@ func runTest(ipFile string, scanID int64) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	scanCancel = cancel
+	scans.SetCancel(cancel)
+	defer scans.Clear(cancel)
 	defer cancel()
 
 	engCfg := engine.Config{
@@ -214,7 +287,8 @@ func runColos(scanID int64) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	scanCancel = cancel
+	scans.SetCancel(cancel)
+	defer scans.Clear(cancel)
 	defer cancel()
 
 	engCfg := engine.Config{
@@ -261,64 +335,6 @@ func sendDone(scanID int64) {
 func sendColosDone(scanID int64) {
 	if prog != nil {
 		prog.Send(ColosDoneMsg{ScanID: scanID})
-	}
-}
-
-// runConfigPhase1 runs Phase 1 of "Scan with Config": a fast connectivity scan
-// that finds healthy Cloudflare IPs (or validates IPs from a file), then signals
-// the UI to start Phase 2 (xray validation) with the best candidates.
-func runConfigPhase1(opts configPhase1Options) {
-	ctx, cancel := context.WithCancel(context.Background())
-	scanCancel = cancel
-	defer cancel()
-
-	engCfg := engine.Config{
-		Concurrency: opts.concurrency,
-		ProbeConfig: prober.Config{
-			Port:       443,
-			Mode:       prober.ModeHTTP,
-			Tries:      2,
-			Timeout:    opts.timeout,
-			SpeedBytes: 0, // Phase 1 is connectivity-only; no download test
-		},
-	}
-	eng := engine.New(engCfg)
-
-	callback := func(r *result.Result) {
-		if prog != nil {
-			prog.Send(ConfigPhase1ResultMsg{Result: r})
-		}
-	}
-
-	if opts.fromFile {
-		ips, err := loadIPs("ips.txt")
-		if err != nil {
-			if prog != nil {
-				prog.Send(ConfigPhase1ErrMsg{Err: "ips.txt not found — place it next to the binary"})
-			}
-			return
-		}
-		if len(ips) == 0 {
-			if prog != nil {
-				prog.Send(ConfigPhase1ErrMsg{Err: "ips.txt is empty — add one IP per line"})
-			}
-			return
-		}
-		eng.RunList(ctx, ips, callback)
-	} else {
-		src, err := ipsrc.New(true, false, nil)
-		if err != nil {
-			if prog != nil {
-				prog.Send(ConfigPhase1DoneMsg{})
-			}
-			return
-		}
-		ipStream := src.Stream(ctx, opts.count)
-		eng.Run(ctx, ipStream, callback)
-	}
-
-	if prog != nil {
-		prog.Send(ConfigPhase1DoneMsg{})
 	}
 }
 
@@ -397,4 +413,129 @@ func parseTimeout(raw string, fallback time.Duration) time.Duration {
 		return time.Duration(seconds) * time.Second
 	}
 	return fallback
+}
+
+func emergencyIPStream(ctx context.Context, src *ipsrc.Source, count int) <-chan net.IP {
+	out := make(chan net.IP, 64)
+	go func() {
+		defer close(out)
+		sent := 0
+		seen := map[string]struct{}{}
+		bad, _ := history.LoadBad(".")
+		good, _ := history.LoadGood(".")
+		for _, rec := range good {
+			if count > 0 && sent >= count {
+				return
+			}
+			if history.ShouldSkipBad(bad, rec.IP) {
+				continue
+			}
+			ip := net.ParseIP(rec.IP)
+			if ip == nil {
+				continue
+			}
+			seen[rec.IP] = struct{}{}
+			select {
+			case <-ctx.Done():
+				return
+			case out <- ip:
+				sent++
+			}
+		}
+		for ip := range src.Stream(ctx, count) {
+			if count > 0 && sent >= count {
+				return
+			}
+			key := ip.String()
+			if _, ok := seen[key]; ok || history.ShouldSkipBad(bad, key) {
+				continue
+			}
+			seen[key] = struct{}{}
+			select {
+			case <-ctx.Done():
+				return
+			case out <- ip:
+				sent++
+			}
+		}
+	}()
+	return out
+}
+
+func runEmergencyExports(scanID int64, cfg ScanConfig, goodIPs, badIPs []string, port int) {
+	if err := history.SaveResults(".", goodIPs, badIPs, port); err != nil {
+		sendError(scanID, fmt.Sprintf("history save failed: %v", err))
+	}
+	if err := output.WriteLines("good_ips.txt", goodIPs); err != nil {
+		sendError(scanID, fmt.Sprintf("good_ips.txt failed: %v", err))
+	}
+	ipPorts := make([]string, 0, len(goodIPs))
+	for _, ip := range goodIPs {
+		ipPorts = append(ipPorts, net.JoinHostPort(ip, strconv.Itoa(port)))
+	}
+	if err := output.WriteLines("ip_port.txt", ipPorts); err != nil {
+		sendError(scanID, fmt.Sprintf("ip_port.txt failed: %v", err))
+	}
+
+	base := strings.TrimSpace(cfg.BaseConfig)
+	if base == "" || len(goodIPs) == 0 {
+		_ = history.SaveLastWorking(".", goodIPs, nil)
+		return
+	}
+	ips := make([]net.IP, 0, len(goodIPs))
+	for _, s := range goodIPs {
+		if ip := net.ParseIP(s); ip != nil {
+			ips = append(ips, ip)
+		}
+	}
+	generated, err := configgen.Generate(base, ips)
+	if err != nil {
+		sendError(scanID, fmt.Sprintf("config generation failed: %v", err))
+		return
+	}
+	if err := output.WriteLines("generated_configs.txt", generated); err != nil {
+		sendError(scanID, fmt.Sprintf("generated_configs.txt failed: %v", err))
+	}
+	working, failed, stable := validateEmergencyConfigs(scanID, generated)
+	_ = output.WriteLines("working_configs.txt", working)
+	_ = output.WriteLines("failed_configs.txt", failed)
+	_ = output.WriteLines("stable_configs.txt", stable)
+	_ = history.SaveLastWorking(".", goodIPs, stable)
+}
+
+func validateEmergencyConfigs(scanID int64, configs []string) (working, failed, stable []string) {
+	limit := len(configs)
+	if limit > 10 {
+		limit = 10
+	}
+	for i := 0; i < limit; i++ {
+		raw := configs[i]
+		cfg, err := xraytest.ParseVLESS(raw)
+		if err != nil {
+			failed = append(failed, raw)
+			sendError(scanID, "Xray validation skipped for non-VLESS configs; generated_configs.txt was still written")
+			continue
+		}
+		ctx := context.Background()
+		vr := xraytest.ValidateConfig(ctx, cfg, 20*time.Second)
+		if prog != nil {
+			prog.Send(ConfigProgressMsg{Result: vr, Done: i + 1, Total: limit})
+		}
+		if !vr.Success {
+			failed = append(failed, raw)
+			continue
+		}
+		working = append(working, raw)
+		successes := 1
+		for attempt := 1; attempt < 3; attempt++ {
+			time.Sleep(500 * time.Millisecond)
+			if xraytest.ValidateConfig(ctx, cfg, 15*time.Second).Success {
+				successes++
+			}
+		}
+		if successes == 3 {
+			stable = append(stable, raw)
+		}
+	}
+	return working, failed, stable
 }

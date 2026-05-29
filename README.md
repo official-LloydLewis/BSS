@@ -8,7 +8,7 @@
 
 A Cloudflare IP scanner with a full terminal UI, built for networks where latency is unpredictable and connections drop without warning. Just run it — no commands to memorize.
 
-It finds the Cloudflare edge nodes that actually work from your location, ranks them by real measured latency and packet loss, and lets you export the results for use in a VLESS/Trojan/xray proxy config. It can also validate IPs end-to-end through your own xray config.
+It finds the Cloudflare edge nodes that actually work from your location, ranks them by real measured latency and packet loss, and lets you export the results for use in a v2ray/xray/Trojan proxy config.
 
 ---
 
@@ -17,25 +17,23 @@ It finds the Cloudflare edge nodes that actually work from your location, ranks 
 Run `senpaiscanner` and you land in a menu. From there you navigate everything with arrow keys and Enter — no flags, no subcommands.
 
 ```
-┌──────────────────────────────────────────┐
-│  ▶  Quick Scan        scan random CF IPs │
-│     Custom Scan        configure details  │
-│     Scan with Config   xray validation   │
-│     Test IPs           validate a list   │
-│     Discover Colos     find reachable DCs│
-│     About                                │
-│     Quit                                 │
-└──────────────────────────────────────────┘
+┌──────────────────────────────────────┐
+│  ▶  Quick Scan    scan random CF IPs │
+│     Custom Scan   configure details  │
+│     Test IPs      validate a list    │
+│     Discover Colos find reachable DCs │
+│     About                            │
+│     Quit                             │
+└──────────────────────────────────────┘
 ```
 
 The scanner:
-- Probes Cloudflare's IP ranges via **TCP**, **TLS handshake**, or **HTTP** validation
+- Probes Cloudflare's IP ranges via **TCP**, **TLS handshake**, or **HTTP** validation (`http` / `https` in Custom Scan)
 - In **TCP/TLS** mode with empty SNI, rotates through several well-known Cloudflare hostnames per try; **HTTP** mode uses `speed.cloudflare.com` for trace and download
 - Measures latency, packet loss, jitter, and (in HTTP mode) a small download throughput sample
 - Identifies the colo (Cloudflare PoP) behind each IP via `/cdn-cgi/trace` (with `CF-Ray` fallback)
 - Shows live results in a color-coded table; after a scan, a **Results** screen lists the top healthy IPs
-- Writes **CSV, JSON Lines, or TXT** only when you set an output path in **Custom Scan**
-- Can validate the best candidates directly through your own **VLESS or Trojan** xray config
+- Writes **CSV, JSON Lines, or TXT** only when you set an output path in **Custom Scan** (other modes are on-screen only)
 
 ---
 
@@ -57,13 +55,15 @@ Download from the [releases page](https://github.com/matinsenpai/senpaiscanner/r
 
 stable release:
 ```bash
-curl -fsSL https://github.com/MatinSenPai/SenPaiScanner/raw/refs/heads/main/install.sh | bash
+
+curl -fsSL https://github.com/matinsenpai/senpaiscanner/raw/refs/heads/main/install.sh | bash
 ```
 
 pre-release:
 ```bash
-curl -fsSL https://github.com/MatinSenPai/SenPaiScanner/raw/refs/heads/main/install.sh | bash -s -- --prerelease
+curl -fsSL https://github.com/matinsenpai/senpaiscanner/raw/refs/heads/main/install.sh | bash -s -- --prerelease
 ```
+
 
 **Windows (PowerShell):**
 ```powershell
@@ -105,7 +105,6 @@ Everything else is inside the TUI — there are no scan-related CLI flags.
 ### Scan screens
 
 #### Quick Scan
-
 Opens a three-row setup screen. Use `↑/↓` to move between rows and `←/→` to pick a preset.
 
 **Enter on a preset launches the scan immediately** (you do not need to visit every row). Workers and timeout use whatever is currently selected on those rows — on first open the defaults are **50** workers and **5s** timeout. Choose **Custom** on a row to type your own value; after the last row, Enter starts the scan.
@@ -140,7 +139,6 @@ Opens a three-row setup screen. Use `↑/↓` to move between rows and `←/→`
 All other settings stay at defaults: HTTP validation mode, port 443, 4 tries per IP, and a small 64 KiB `speed.cloudflare.com` download sample for ranking real data transfer.
 
 #### Custom Scan
-
 A form where you configure:
 
 | Field | Default | Notes |
@@ -151,7 +149,7 @@ A form where you configure:
 | Tries | 4 | probes per IP (for loss/jitter) |
 | Port | 443 | 443 or 80 |
 | CIDR | (all CF) | e.g. `104.16.0.0/13`; when set, scan only the entered CIDR range(s) instead of all built-in Cloudflare ranges |
-| Output | (none) | `.csv`, `.json`, `.jsonl`, or `.txt` — only healthy IPs are written |
+| Output | (none) | `.csv`, `.json`, `.jsonl`, or `.txt` |
 | Colo filter | (all) | e.g. `FRA,AMS` |
 | SNI | (empty) | override hostname; empty = rotate (TCP/TLS) or `speed.cloudflare.com` (HTTP) |
 | Mode | HTTP | `http` (or `https`), `tls`, or `tcp` — cycle with **Ctrl+← / Ctrl+→** |
@@ -159,51 +157,53 @@ A form where you configure:
 
 Navigate fields with Tab / Shift+Tab (or ↑/↓). Press Enter to start. Timeout accepts Go durations like `1500ms` or `5s`; a plain number is treated as seconds.
 
-Set **Output** to a path ending in `.csv`, `.json`, `.jsonl`, or `.txt` to stream results to disk during the scan. Only IPs that pass all probes are written.
+Set **Output** to a path ending in `.csv`, `.json`, `.jsonl`, or `.txt` to stream results to disk during the scan. Unknown extensions are rejected instead of guessed. Quick Scan, Test IPs, and Discover Colos do not write files.
 
-#### Scan with Config
 
-Tests the best Cloudflare IPs end-to-end through your own **VLESS or Trojan** proxy config. Runs in two phases:
+#### Emergency Scan
+Emergency Scan is the fast, practical workflow for unstable/restricted networks. It uses minimal defaults so you can quickly get usable Cloudflare IPs without filling out a long form:
 
-**Phase 1 — Connectivity scan**
+| Setting | Emergency default |
+|---|---|
+| IP family | IPv4 only |
+| Count | 1,000 candidates |
+| Workers | 50 |
+| Timeout | 5s |
+| Tries | 2 |
+| Mode / port | HTTP on 443 |
+| Stop condition | stop after 10 healthy IPs |
 
-Quickly identifies reachable Cloudflare IPs using the same HTTP prober as Quick Scan. Configure:
+When you select **Emergency Scan**, you can either press Enter with an empty config field for IP-only output, or paste a base `vless://`, `trojan://`, or `vmess://` share URL. Only the server/address part is replaced; UUID/password, port, SNI, host, path, query parameters, and the name/fragment are preserved.
 
-| Setting | Options | Notes |
-|---|---|---|
-| Config URL | paste your URL | `vless://...` or `trojan://...` share URL |
-| Count | 1,000 / 5,000 / 20,000 / Custom | IPs to probe in Phase 1 |
-| Workers | 50 / 100 / 200 / Custom | parallel probers |
-| Timeout | 2s / 3s / 5s / Custom | per-probe deadline |
-| Source | Random IPs / From File | random Cloudflare ranges or IPs from `ips.txt` |
-| Top N | 10 / 25 / 50 / All | best IPs to pass to Phase 2 |
+Emergency Scan writes these files in the current working directory:
 
-When **Source → From File** is selected, put your candidate IPs in `ips.txt` (one IP per line) in the **same directory** as the binary before starting.
+| File | Contents |
+|---|---|
+| `good_ips.txt` | Healthy IPs, one per line |
+| `ip_port.txt` | Healthy candidates in `IP:PORT` form |
+| `generated_configs.txt` | All generated configs when a base config is provided |
+| `working_configs.txt` | Only configs that pass Xray validation |
+| `stable_configs.txt` | Only configs that pass the short 3/3 stability test |
+| `failed_configs.txt` | Generated configs that failed validation, when useful |
 
-**Phase 2 — xray validation**
+Emergency Scan also maintains simple local history files:
 
-Launches an embedded xray instance and tests each candidate IP through your config. Results appear in a live table showing whether each IP actually works with your config.
+| File | Purpose |
+|---|---|
+| `good_ips.json` | Previously healthy IPs to retest first |
+| `bad_ips.json` | Recently repeated failures to skip by default |
+| `last_working.json` | Last working IP/config set |
 
-**Navigation on the setup screen:**
+Press `h` on the Emergency Scan setup screen to toggle history behavior. The default uses history (retest known-good IPs first and skip repeated recent failures). Use **ignore history** when the network is unstable and previously bad IPs may have become usable again.
 
-| Key | Action |
-|-----|--------|
-| `↑` / `↓` | move between rows |
-| `←` / `→` | change option on current row |
-| `Enter` on URL row | move focus to next row |
-| `Enter` on any other row | start the scan |
-| `Esc` | go back |
-
-On the URL row, `←` / `→` move the text cursor; `Ctrl+A` / `Ctrl+E` jump to start / end.
+If an `xray` binary is available on `PATH`, Emergency Scan validates generated VLESS/Trojan configs through Xray before writing `working_configs.txt`, then runs a short stability check before writing `stable_configs.txt`. If Xray is missing or unavailable, the scan does not crash: `generated_configs.txt` is still written and validation-only files remain empty or contain only validated results. VMess configs are generated for import, but automated Xray validation currently focuses on VLESS/Trojan share URLs.
 
 #### Test IPs
-
 Put IPs in `ips.txt` in the **current working directory** (one per line, or CSV with IP in the first column) **before** you select this menu item. The scan **starts as soon as you choose Test IPs** from the menu.
 
 Settings: HTTP on port 443, 6 tries, 10s timeout, 20 workers, fixed SNI `speed.cloudflare.com`, 512 KiB download sample, colo via `/cdn-cgi/trace`. Good for confirming candidates before putting them in a proxy config.
 
 #### Discover Colos
-
 Probes **300** random **IPv4** addresses via HTTP (`/cdn-cgi/trace` only — no download sample, 2 tries, 5s timeout). When finished, shows a table grouped by colo with average and best latency among healthy results.
 
 ### Live scan keys
@@ -211,21 +211,12 @@ Probes **300** random **IPv4** addresses via HTTP (`/cdn-cgi/trace` only — no 
 | Key | Action |
 |-----|--------|
 | `s` | cycle sort: avg → loss → jitter → colo → speed (download) |
-| `c` | copy all healthy IPs to clipboard (one per line) |
 | `q` / `Esc` | while running: cancel and return to menu; when done: open **Results** |
 | `Enter` | when done: open **Results** |
 
 ### Results screen
 
-After Quick Scan or Custom Scan finishes, shows up to **20** healthy IPs (sorted by average latency).
-
-| Key | Action |
-|-----|--------|
-| `s` | re-sort results |
-| `c` | copy all healthy IPs to clipboard (one per line) |
-| `Enter` / `q` / `Esc` | return to the main menu |
-
-There is no file export from this screen — use Custom Scan **Output** if you need a file.
+After Quick Scan or Custom Scan finishes, shows up to **20** healthy IPs (sorted by average latency). `s` re-sorts; `Enter` / `q` / `Esc` return to the main menu. There is no file export from this screen — use Custom Scan **Output** if you need a file.
 
 ### About
 
@@ -235,7 +226,7 @@ Version string and short project blurb; `Enter` / `q` / `Esc` back to the menu.
 
 ## Output formats
 
-Only **Custom Scan** writes a file, when **Output** is set. Only IPs that pass all probes are written. Rows are appended in real time as results arrive.
+**Custom Scan** writes a file when **Output** is set. Rows are appended in real time as results arrive. **Emergency Scan** always writes its practical rescue files (`good_ips.txt`, `ip_port.txt`, and config files when applicable) in the current working directory.
 
 **CSV** (`.csv`):
 ```
@@ -252,10 +243,8 @@ Each line is a standalone JSON object; the file is not wrapped in an array so re
 
 **TXT** (`.txt`):
 ```
-104.21.14.53
-104.21.14.54
+104.21.14.53    loss=0.0%   avg=87.40ms   jitter=4.20ms   dl=540.8KB/s   colo=FRA
 ```
-Plain IP-per-line — ready to paste directly into xray / Sing-Box / Clash configs without editing.
 
 ---
 
@@ -271,7 +260,7 @@ Plain IP-per-line — ready to paste directly into xray / Sing-Box / Clash confi
 
 **SNI.** In Custom Scan, leave SNI empty for automatic behavior: **TCP/TLS** rotates hostnames per try; **HTTP** (Quick/Custom Scan default) always uses `speed.cloudflare.com`. Override SNI if you need a specific hostname (especially for TLS/TCP on filtered networks).
 
-**End-to-end config validation.** Use **Scan with Config** to confirm that a candidate IP actually tunnels traffic through your VLESS or Trojan config, because DPI behavior can depend on transport, SNI, path, ALPN, and fragmentation settings that the connectivity scan does not test.
+**Final proxy validation still matters.** The strongest test is replacing the address in your VLESS/VMess/Trojan config and testing through Xray/V2Ray, because DPI behavior can depend on transport, SNI, path, ALPN, and fragmentation settings.
 
 ---
 
@@ -292,9 +281,6 @@ Lower workers and raise timeout: set concurrency to 30 and timeout to 8s. The de
 **Where do the IP ranges come from?**
 Embedded directly from Cloudflare's official published lists (`cloudflare.com/ips-v4`, `cloudflare.com/ips-v6`). The binary ships with a snapshot; there's no auto-update mechanism by design, since the ranges rarely change.
 
-**Scan with Config says "ips.txt not found".**
-When **Source → From File** is selected, the binary looks for `ips.txt` in the directory you run it from. Place the file there before starting. You can populate it from a previous Custom Scan by setting **Output** to `ips.txt`.
-
 ---
 
 ## Building from source
@@ -308,12 +294,6 @@ make test
 make install        # to $GOPATH/bin
 ```
 
-**Windows (cross-compile all platforms):**
-```powershell
-powershell -ExecutionPolicy Bypass -File build.ps1
-```
-Binaries land in `dist/`.
-
 ---
 
 ## Contributing
@@ -326,6 +306,7 @@ For bugs, include your OS/arch, the screen you were on, and what happened.
 
 ## Roadmap
 
+- Real Xray/V2Ray config validation with user-provided configs
 - Configurable download/upload thresholds for final filtering
 - Persistent settings saved between sessions
 - `Watch` mode for continuous monitoring

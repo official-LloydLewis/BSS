@@ -1,4 +1,5 @@
 # Binaries
+/senpaiscanner
 *.exe
 *.dll
 *.so
@@ -51,6 +52,14 @@ Desktop.ini
 logs/
 
 # Runtime state / output
+
+# SenPaiScanner runtime output files
+good_ips.txt
+ip_port.txt
+generated_configs.txt
+working_configs.txt
+stable_configs.txt
+failed_configs.txt
 .senpaiscanner-state.json
 results/
 *.csv

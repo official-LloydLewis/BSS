@@ -1,29 +1,21 @@
 package xraytest
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
 )
 
-// VLESSConfig holds parsed parameters from a VLESS or Trojan share URL.
-// Check the Protocol field to know which type this is.
+// VLESSConfig holds parsed parameters from a VLESS share URL.
 type VLESSConfig struct {
-	// Protocol is "vless" or "trojan".
-	Protocol string
-
-	// VLESS-specific
 	UUID       string
+	Address    string
+	Port       int
 	Encryption string
 	Flow       string
-
-	// Trojan-specific
-	Password string
-
-	// Common
-	Address string
-	Port    int
 
 	// Transport
 	Network     string // ws, grpc, xhttp, tcp
@@ -42,20 +34,6 @@ type VLESSConfig struct {
 
 	// Metadata
 	Remark string
-}
-
-// ParseProxyURL auto-detects the protocol (vless:// or trojan://) and parses
-// the share URL into a VLESSConfig. Returns an error if the scheme is unknown.
-func ParseProxyURL(raw string) (*VLESSConfig, error) {
-	raw = strings.TrimSpace(raw)
-	switch {
-	case strings.HasPrefix(raw, "vless://"):
-		return ParseVLESS(raw)
-	case strings.HasPrefix(raw, "trojan://"):
-		return ParseTrojan(raw)
-	default:
-		return nil, fmt.Errorf("unsupported URL scheme — must start with vless:// or trojan://")
-	}
 }
 
 // ParseVLESS parses a vless:// share URL into a VLESSConfig.
@@ -102,17 +80,10 @@ func ParseVLESS(raw string) (*VLESSConfig, error) {
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		// The '?' separator may have been silently dropped by some paste
-		// handlers. Recover: extract leading digits as port and treat the
-		// remainder as additional query params.
-		port, params, err = recoverMissingQuerySep(portStr, params)
-		if err != nil {
-			return nil, fmt.Errorf("invalid port %q", portStr)
-		}
+		return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
 	}
 
 	cfg := &VLESSConfig{
-		Protocol:    "vless",
 		UUID:        uuid,
 		Address:     host,
 		Port:        port,
@@ -227,34 +198,6 @@ func splitHostPort(hostPort string) (string, string, error) {
 	return hostPort[:lastColon], hostPort[lastColon+1:], nil
 }
 
-// recoverMissingQuerySep handles URLs where the '?' separator between port and
-// query params was silently dropped (common with certain terminal paste modes).
-// Input: portStr like "2053encryption=none&security=tls&sni=..."
-// It extracts the leading digit run as the port and merges the rest into params.
-func recoverMissingQuerySep(portStr string, params url.Values) (int, url.Values, error) {
-	i := 0
-	for i < len(portStr) && portStr[i] >= '0' && portStr[i] <= '9' {
-		i++
-	}
-	if i == 0 || i == len(portStr) {
-		return 0, params, fmt.Errorf("cannot recover port from %q", portStr)
-	}
-	port, err := strconv.Atoi(portStr[:i])
-	if err != nil {
-		return 0, params, err
-	}
-	extra, _ := url.ParseQuery(portStr[i:])
-	if params == nil {
-		params = make(url.Values)
-	}
-	for k, vs := range extra {
-		if _, exists := params[k]; !exists {
-			params[k] = vs
-		}
-	}
-	return port, params, nil
-}
-
 func paramOr(params url.Values, key, fallback string) string {
 	v := params.Get(key)
 	if v == "" {
@@ -263,67 +206,70 @@ func paramOr(params url.Values, key, fallback string) string {
 	return v
 }
 
-// ParseTrojan parses a trojan:// share URL.
-// Format: trojan://password@address:port?params#remark
-func ParseTrojan(raw string) (*VLESSConfig, error) {
-	if !strings.HasPrefix(raw, "trojan://") {
+// TrojanConfig holds parsed parameters from a trojan:// share URL.
+type TrojanConfig struct {
+	Password string
+	Address  string
+	Port     int
+
+	Network     string
+	Path        string
+	Host        string
+	ServiceName string
+	Mode        string
+	Authority   string
+
+	Security    string
+	SNI         string
+	Fingerprint string
+	ALPN        []string
+	Insecure    bool
+	Remark      string
+}
+
+// ParseTrojan parses a trojan:// share URL into a TrojanConfig.
+func ParseTrojan(raw string) (*TrojanConfig, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse trojan URL: %w", err)
+	}
+	if strings.ToLower(u.Scheme) != "trojan" {
 		return nil, fmt.Errorf("not a trojan:// URL")
 	}
-
-	raw = strings.TrimPrefix(raw, "trojan://")
-
-	// Split remark
-	remark := ""
-	if idx := strings.LastIndex(raw, "#"); idx != -1 {
-		remark = raw[idx+1:]
-		raw = raw[:idx]
+	if u.User == nil || u.Host == "" {
+		return nil, fmt.Errorf("missing password or server address")
 	}
-	remark, _ = url.QueryUnescape(remark)
-
-	// Split params
-	params := url.Values{}
-	if idx := strings.Index(raw, "?"); idx != -1 {
-		var err error
-		params, err = url.ParseQuery(raw[idx+1:])
-		if err != nil {
-			return nil, fmt.Errorf("parsing query params: %w", err)
-		}
-		raw = raw[:idx]
+	password, _ := u.User.Password()
+	if password == "" {
+		password = u.User.Username()
 	}
-
-	// Split password@address:port
-	atIdx := strings.Index(raw, "@")
-	if atIdx == -1 {
-		return nil, fmt.Errorf("missing @ in URL")
+	if password == "" {
+		return nil, fmt.Errorf("missing password")
 	}
-	password, _ := url.QueryUnescape(raw[:atIdx])
-	hostPort := raw[atIdx+1:]
-
-	host, portStr, err := splitHostPort(hostPort)
-	if err != nil {
-		return nil, fmt.Errorf("parsing host:port %q: %w", hostPort, err)
+	host := u.Hostname()
+	portStr := u.Port()
+	if host == "" || portStr == "" {
+		return nil, fmt.Errorf("missing host or port")
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		port, params, err = recoverMissingQuerySep(portStr, params)
-		if err != nil {
-			return nil, fmt.Errorf("invalid port %q", portStr)
-		}
+		return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
 	}
-
-	cfg := &VLESSConfig{
-		Protocol:    "trojan",
+	params := u.Query()
+	cfg := &TrojanConfig{
 		Password:    password,
 		Address:     host,
 		Port:        port,
 		Network:     paramOr(params, "type", "tcp"),
 		Security:    paramOr(params, "security", "tls"),
 		SNI:         params.Get("sni"),
-		Fingerprint: paramOr(params, "fp", ""),
+		Fingerprint: params.Get("fp"),
 		Insecure:    params.Get("insecure") == "1" || params.Get("allowInsecure") == "1",
-		Remark:      remark,
+		Remark:      u.Fragment,
 	}
-
+	if cfg.SNI == "" {
+		cfg.SNI = params.Get("peer")
+	}
 	switch cfg.Network {
 	case "ws":
 		cfg.Path = paramOr(params, "path", "/")
@@ -332,15 +278,87 @@ func ParseTrojan(raw string) (*VLESSConfig, error) {
 		cfg.ServiceName = params.Get("serviceName")
 		cfg.Authority = params.Get("authority")
 		cfg.Mode = paramOr(params, "mode", "gun")
-	case "xhttp", "splithttp":
-		cfg.Path = paramOr(params, "path", "/")
-		cfg.Host = paramOr(params, "host", cfg.SNI)
-		cfg.Mode = paramOr(params, "mode", "auto")
 	}
-
 	if alpnStr := params.Get("alpn"); alpnStr != "" {
 		cfg.ALPN = strings.Split(alpnStr, ",")
 	}
-
 	return cfg, nil
+}
+
+// ShareSummary is a compact, UI-safe summary of a supported share URL.
+type ShareSummary struct {
+	Protocol  string
+	Server    string
+	Port      int
+	Transport string
+	SNI       string
+	Host      string
+	Path      string
+}
+
+// ParseShareSummary extracts common fields from vless://, trojan://, and vmess:// URLs.
+func ParseShareSummary(raw string) (ShareSummary, error) {
+	raw = strings.TrimSpace(raw)
+	scheme := ""
+	if idx := strings.Index(raw, "://"); idx > 0 {
+		scheme = strings.ToLower(raw[:idx])
+	}
+	switch scheme {
+	case "vless":
+		cfg, err := ParseVLESS(raw)
+		if err != nil {
+			return ShareSummary{}, err
+		}
+		return ShareSummary{Protocol: "vless", Server: cfg.Address, Port: cfg.Port, Transport: cfg.Network, SNI: cfg.SNI, Host: cfg.Host, Path: cfg.Path}, nil
+	case "trojan":
+		cfg, err := ParseTrojan(raw)
+		if err != nil {
+			return ShareSummary{}, err
+		}
+		return ShareSummary{Protocol: "trojan", Server: cfg.Address, Port: cfg.Port, Transport: cfg.Network, SNI: cfg.SNI, Host: cfg.Host, Path: cfg.Path}, nil
+	case "vmess":
+		payload := strings.TrimSpace(strings.TrimPrefix(raw, "vmess://"))
+		decoded, err := decodeVmess(payload)
+		if err != nil {
+			return ShareSummary{}, fmt.Errorf("decode vmess: %w", err)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(decoded, &obj); err != nil {
+			return ShareSummary{}, fmt.Errorf("parse vmess json: %w", err)
+		}
+		server := firstString(obj, "add", "address")
+		port, _ := strconv.Atoi(firstString(obj, "port"))
+		return ShareSummary{
+			Protocol:  "vmess",
+			Server:    server,
+			Port:      port,
+			Transport: firstString(obj, "net", "type"),
+			SNI:       firstString(obj, "sni", "serverName"),
+			Host:      firstString(obj, "host"),
+			Path:      firstString(obj, "path"),
+		}, nil
+	default:
+		return ShareSummary{}, fmt.Errorf("unsupported config scheme")
+	}
+}
+
+func firstString(obj map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := obj[key]; ok {
+			switch x := v.(type) {
+			case string:
+				return x
+			case float64:
+				return strconv.Itoa(int(x))
+			}
+		}
+	}
+	return ""
+}
+
+func decodeVmess(s string) ([]byte, error) {
+	if b, err := base64.RawStdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.StdEncoding.DecodeString(s)
 }

@@ -106,3 +106,16 @@ func assertEqual(t *testing.T, field, got, want string) {
 func itoa(n int) string {
 	return fmt.Sprintf("%d", n)
 }
+
+func TestParseShareSummaryXHTTPUsesConfigType(t *testing.T) {
+	raw := "vless://abcdef12-3456-7890-abcd-ef1234567890@test.example.org:2053?encryption=none&security=tls&sni=test.example.org&fp=chrome&type=xhttp&host=test.example.org&path=%2Fdownload&mode=auto#CF-XHTTP"
+	summary, err := ParseShareSummary(raw)
+	if err != nil {
+		t.Fatalf("ParseShareSummary failed: %v", err)
+	}
+	assertEqual(t, "Protocol", summary.Protocol, "vless")
+	assertEqual(t, "Transport", summary.Transport, "xhttp")
+	assertEqual(t, "SNI", summary.SNI, "test.example.org")
+	assertEqual(t, "Host", summary.Host, "test.example.org")
+	assertEqual(t, "Path", summary.Path, "/download")
+}

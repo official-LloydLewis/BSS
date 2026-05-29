@@ -14,14 +14,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/official-LloydLewis/SenPaiScanner/internal/banner"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/config"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/configgen"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/engine"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/ipsrc"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/prober"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/xraytest"
+	"github.com/matinsenpai/senpaiscanner/internal/banner"
+	"github.com/matinsenpai/senpaiscanner/internal/config"
+	"github.com/matinsenpai/senpaiscanner/internal/configgen"
+	"github.com/matinsenpai/senpaiscanner/internal/engine"
+	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
+	"github.com/matinsenpai/senpaiscanner/internal/prober"
+	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
 )
 
 // ---------------------------------------------------------------------------
@@ -119,7 +119,6 @@ type ScanConfig struct {
 	StopAfterHealthy int
 	Emergency        bool
 	BaseConfig       string
-	IgnoreHistory    bool
 	UseV4            bool
 	UseV6            bool
 }
@@ -530,7 +529,6 @@ func (m AppModel) selectMenuItem() (tea.Model, tea.Cmd) {
 		m.configInput.SetValue("")
 		m.configInput.Placeholder = "optional vless:// trojan:// or vmess:// config (Enter empty for IP-only)"
 		m.configInput.Focus()
-		m.emergencyIgnoreHistory = false
 		m.configResults = nil
 		m.statusMsg = ""
 		return m, textinput.Blink
@@ -2100,16 +2098,11 @@ func (m AppModel) viewEmergencyScan() string {
 	sb.WriteString(styleDim.Render("    good_ips.txt, ip_port.txt, generated_configs.txt (when config is provided)\n\n"))
 	sb.WriteString(styleHeader.Render("  Base config (optional)  "))
 	sb.WriteString(m.configInput.View() + "\n")
-	sb.WriteString(styleDim.Render("  Leave empty for IP-only emergency output. Supports vless://, trojan://, vmess:// generation.\n"))
-	historyMode := "use history (retest good, skip repeated bad)"
-	if m.emergencyIgnoreHistory {
-		historyMode = "ignore history (fresh scan, do not skip bad)"
-	}
-	sb.WriteString(styleHeader.Render("  History mode           ") + styleNormal.Render(historyMode) + "\n\n")
+	sb.WriteString(styleDim.Render("  Leave empty for IP-only emergency output. Supports vless://, trojan://, vmess:// generation.\n\n"))
 	if m.statusMsg != "" {
 		sb.WriteString(styleWarn.Render("  "+m.statusMsg) + "\n\n")
 	}
-	sb.WriteString(styleHint.Render("  h toggle history   enter start   esc back"))
+	sb.WriteString(styleHint.Render("  enter start   esc back"))
 	return sb.String()
 }
 
@@ -2120,9 +2113,6 @@ func (m AppModel) handleEmergencyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.page = PageHome
 		return m, nil
-	case "h":
-		m.emergencyIgnoreHistory = !m.emergencyIgnoreHistory
-		return m, nil
 	case "enter":
 		base := strings.TrimSpace(m.configInput.Value())
 		if base != "" {
@@ -2131,7 +2121,7 @@ func (m AppModel) handleEmergencyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		cfg := ScanConfig{Count: "1000", Concurrency: "50", Timeout: "5s", Tries: "2", Port: "443", Mode: "http", UseV4: true, UseV6: false, StopAfterHealthy: 10, Emergency: true, BaseConfig: base, IgnoreHistory: m.emergencyIgnoreHistory}
+		cfg := ScanConfig{Count: "1000", Concurrency: "50", Timeout: "5s", Tries: "2", Port: "443", Mode: "http", UseV4: true, UseV6: false, StopAfterHealthy: 10, Emergency: true, BaseConfig: base}
 		m.scanCfg = cfg
 		m.activeScanID = nextScanID()
 		m.statusMsg = "Emergency scan running; exports will be written in the current directory."

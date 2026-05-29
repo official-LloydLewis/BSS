@@ -92,14 +92,14 @@ func generateVMess(base string, ips []net.IP) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, "vmess://"+base64.StdEncoding.EncodeToString(b))
+		out = append(out, "vmess://"+base64.RawStdEncoding.EncodeToString(b))
 	}
 	return out, nil
 }
 
 func decodeVmess(s string) ([]byte, error) {
-	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+	if b, err := base64.RawStdEncoding.DecodeString(s); err == nil {
 		return b, nil
 	}
-	return base64.RawStdEncoding.DecodeString(s)
+	return base64.StdEncoding.DecodeString(s)
 }

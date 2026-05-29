@@ -41,19 +41,7 @@ func XrayAvailable() bool {
 // ValidateConfig starts an external xray process with the given config, sends
 // test traffic through it, and returns the result. Retries once on failure.
 func ValidateConfig(ctx context.Context, cfg *VLESSConfig, timeout time.Duration) *ValidationResult {
-	return validateWithRetry(ctx, cfg.Address, cfg.Port, cfg.Network, timeout, func(port int) ([]byte, error) {
-		return BuildXrayConfig(cfg, port)
-	})
-}
-
-func ValidateTrojanConfig(ctx context.Context, cfg *TrojanConfig, timeout time.Duration) *ValidationResult {
-	return validateWithRetry(ctx, cfg.Address, cfg.Port, cfg.Network, timeout, func(port int) ([]byte, error) {
-		return BuildTrojanXrayConfig(cfg, port)
-	})
-}
-
-func validateWithRetry(ctx context.Context, ip string, port int, transport string, timeout time.Duration, build func(int) ([]byte, error)) *ValidationResult {
-	res := validateOnce(ctx, ip, port, transport, timeout, build)
+	res := validateOnce(ctx, cfg, timeout)
 	if !res.Success && XrayAvailable() {
 		time.Sleep(500 * time.Millisecond)
 		res2 := validateOnce(ctx, ip, port, transport, timeout, build)
@@ -66,8 +54,8 @@ func validateWithRetry(ctx context.Context, ip string, port int, transport strin
 	return res
 }
 
-func validateOnce(ctx context.Context, ip string, port int, transport string, timeout time.Duration, build func(int) ([]byte, error)) *ValidationResult {
-	result := &ValidationResult{IP: ip, Port: port, Transport: transport}
+func validateOnce(ctx context.Context, cfg *VLESSConfig, timeout time.Duration) *ValidationResult {
+	result := &ValidationResult{IP: cfg.Address, Port: cfg.Port, Transport: cfg.Network}
 	path, err := exec.LookPath("xray")
 	if err != nil {
 		result.Error = "xray binary not found; validation skipped"
@@ -75,7 +63,7 @@ func validateOnce(ctx context.Context, ip string, port int, transport string, ti
 	}
 
 	socksPort := nextPort()
-	configJSON, err := build(socksPort)
+	configJSON, err := BuildXrayConfig(cfg, socksPort)
 	if err != nil {
 		result.Error = fmt.Sprintf("build config: %v", err)
 		return result

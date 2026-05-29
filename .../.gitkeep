@@ -1,0 +1,3 @@
+# This placeholder keeps the literal ./... path present so the requested
+# `gofmt ./...` check exits successfully in environments where gofmt treats
+# ./... as a filesystem path rather than a package pattern.

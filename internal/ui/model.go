@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -13,13 +14,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/matinsenpai/senpaiscanner/internal/banner"
-	"github.com/matinsenpai/senpaiscanner/internal/config"
-	"github.com/matinsenpai/senpaiscanner/internal/engine"
-	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
-	"github.com/matinsenpai/senpaiscanner/internal/prober"
-	"github.com/matinsenpai/senpaiscanner/internal/result"
-	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/banner"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/config"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/configgen"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/engine"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/ipsrc"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/prober"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/xraytest"
 )
 
 // ---------------------------------------------------------------------------
@@ -104,18 +106,22 @@ var (
 // ---------------------------------------------------------------------------
 
 type ScanConfig struct {
-	Count       string
-	Concurrency string
-	Timeout     string
-	Tries       string
-	Port        string
-	Mode        string // tcp|tls|http
-	CIDR        string
-	OutputFile  string
-	ColoFilter  string
-	SNI         string
-	UseV4       bool
-	UseV6       bool
+	Count            string
+	Concurrency      string
+	Timeout          string
+	Tries            string
+	Port             string
+	Mode             string // tcp|tls|http
+	CIDR             string
+	OutputFile       string
+	ColoFilter       string
+	SNI              string
+	StopAfterHealthy int
+	Emergency        bool
+	BaseConfig       string
+	IgnoreHistory    bool
+	UseV4            bool
+	UseV6            bool
 }
 
 func defaultScanConfig() ScanConfig {
@@ -231,6 +237,9 @@ type AppModel struct {
 	configPhase1Done    bool
 	configPhase1Stats   StatsMsg
 
+	// emergency scan
+	emergencyIgnoreHistory bool
+
 	// shared
 	statusMsg string
 	version   string
@@ -244,6 +253,7 @@ type menuEntry struct {
 var menuEntries = []menuEntry{
 	{"Quick Scan", "scan random Cloudflare IPs"},
 	{"Custom Scan", "configure count, mode, CIDR, output…"},
+	{"Emergency Scan", "find 10 usable IPs and export ready files"},
 	{"Scan with Config", "test IPs with your VLESS/xray config"},
 	{"Test IPs", "deep-test a list of IPs from file"},
 	{"Discover Colos", "find reachable Cloudflare PoPs"},
@@ -256,11 +266,12 @@ const menuLabelWidth = 16
 const (
 	menuQuickScan      = 0
 	menuCustomScan     = 1
-	menuScanWithConfig = 2
-	menuTestIPs        = 3
-	menuColos          = 4
-	menuAbout          = 5
-	menuQuit           = 6
+	menuEmergency      = 2
+	menuScanWithConfig = 3
+	menuTestIPs        = 4
+	menuColos          = 5
+	menuAbout          = 6
+	menuQuit           = 7
 )
 
 var modes = []string{"tls", "tcp", "http"}
@@ -466,6 +477,8 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.page = PageHome
 		}
 		return m, nil
+	case PageEmergencyScan:
+		return m.handleEmergencyKey(msg)
 	case PageScanWithConfig:
 		return m.handleScanWithConfigKey(msg)
 	case PageConfigPhase1:
@@ -512,10 +525,21 @@ func (m AppModel) selectMenuItem() (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		m.buildFormInputs()
 		m.page = PageScanConfig
+	case menuEmergency:
+		m.page = PageEmergencyScan
+		m.configInput.SetValue("")
+		m.configInput.Placeholder = "optional vless:// trojan:// or vmess:// config (Enter empty for IP-only)"
+		m.configInput.Focus()
+		m.emergencyIgnoreHistory = false
+		m.configResults = nil
+		m.statusMsg = ""
+		return m, textinput.Blink
 	case menuScanWithConfig:
 		m.page = PageScanWithConfig
+		m.configInput.Placeholder = "vless://..."
 		m.configInput.SetValue("")
 		m.configInput.Focus()
+		m.emergencyIgnoreHistory = false
 		m.configResults = nil
 		m.configScanning = false
 		m.configDone = false
@@ -950,6 +974,8 @@ func (m AppModel) View() string {
 		return m.viewLiveColos()
 	case PageAbout:
 		return m.viewAbout()
+	case PageEmergencyScan:
+		return m.viewEmergencyScan()
 	case PageScanWithConfig:
 		return m.viewScanWithConfig()
 	case PageConfigPhase1:
@@ -1304,6 +1330,36 @@ func (m AppModel) viewResults() string {
 	if m.scanCfg.OutputFile != "" {
 		sb.WriteString(styleDim.Render(fmt.Sprintf("  Saved → %s\n", m.scanCfg.OutputFile)))
 	}
+	if m.scanCfg.Emergency {
+		sb.WriteString(styleDim.Render("  Emergency files → good_ips.txt, ip_port.txt"))
+		if strings.TrimSpace(m.scanCfg.BaseConfig) != "" {
+			sb.WriteString(styleDim.Render(", generated_configs.txt, working_configs.txt, stable_configs.txt"))
+		}
+		sb.WriteString("\n")
+		if len(m.configResults) > 0 {
+			sb.WriteString("\n")
+			sb.WriteString(styleHeader.Render(fmt.Sprintf("  %-18s  %-6s  %-9s  %8s  %10s\n", "IP", "Xray", "Stability", "Latency", "Speed")))
+			sb.WriteString(styleSep.Render("  " + strings.Repeat("─", 62) + "\n"))
+			for _, vr := range m.configResults {
+				xray := "fail"
+				stability := "failed"
+				if vr.Success {
+					xray = "ok"
+					stability = "tested"
+				}
+				speed := "—"
+				if vr.Throughput > 0 {
+					speed = fmt.Sprintf("%.1fKB/s", vr.Throughput/1024)
+				}
+				line := fmt.Sprintf("  %-18s  %-6s  %-9s  %8s  %10s\n", vr.IP, xray, stability, vr.Latency.Round(time.Millisecond), speed)
+				if vr.Success {
+					sb.WriteString(styleGood.Render(line))
+				} else {
+					sb.WriteString(styleBad.Render(line))
+				}
+			}
+		}
+	}
 	sb.WriteString("\n")
 	if m.statusMsg != "" {
 		sb.WriteString(styleGood.Render("  "+m.statusMsg) + "\n")
@@ -1355,7 +1411,7 @@ func (m AppModel) viewAbout() string {
 	sb.WriteString(styleNormal.Render("  jitter, and identifies the colo (PoP) behind each IP."))
 	sb.WriteString("\n\n")
 
-	sb.WriteString(styleDim.Render("  github.com/matinsenpai/senpaiscanner"))
+	sb.WriteString(styleDim.Render("  github.com/official-LloydLewis/SenPaiScanner"))
 	sb.WriteString("\n\n")
 	sb.WriteString(styleHint.Render("  enter/q → back"))
 	return sb.String()
@@ -1942,9 +1998,7 @@ func (m AppModel) viewConfigPhase1() string {
 func (m AppModel) handleConfigPhase1Key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
-		if scanCancel != nil {
-			scanCancel()
-		}
+		scans.Cancel()
 		m.page = PageHome
 		return m, nil
 	}
@@ -1968,7 +2022,8 @@ func runConfigPhase1(count int) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	scanCancel = cancel
+	scans.SetCancel(cancel)
+	defer scans.Clear(cancel)
 	defer cancel()
 
 	engCfg := engine.Config{
@@ -2035,4 +2090,61 @@ func runConfigPhase2(rawURL string, topIPs []*result.Result) {
 	if prog != nil {
 		prog.Send(ConfigDoneMsg{})
 	}
+}
+
+func (m AppModel) viewEmergencyScan() string {
+	var sb strings.Builder
+	sb.WriteString(styleTitle.Render("\n  🚨  Emergency Scan\n"))
+	sb.WriteString(fmt.Sprintf("%s\n\n", styleSep.Render("  "+strings.Repeat("─", minInt(m.width-4, 70)))))
+	sb.WriteString(styleNormal.Render("  Finds up to 10 healthy IPv4 Cloudflare IPs quickly and writes:\n"))
+	sb.WriteString(styleDim.Render("    good_ips.txt, ip_port.txt, generated_configs.txt (when config is provided)\n\n"))
+	sb.WriteString(styleHeader.Render("  Base config (optional)  "))
+	sb.WriteString(m.configInput.View() + "\n")
+	sb.WriteString(styleDim.Render("  Leave empty for IP-only emergency output. Supports vless://, trojan://, vmess:// generation.\n"))
+	historyMode := "use history (retest good, skip repeated bad)"
+	if m.emergencyIgnoreHistory {
+		historyMode = "ignore history (fresh scan, do not skip bad)"
+	}
+	sb.WriteString(styleHeader.Render("  History mode           ") + styleNormal.Render(historyMode) + "\n\n")
+	if m.statusMsg != "" {
+		sb.WriteString(styleWarn.Render("  "+m.statusMsg) + "\n\n")
+	}
+	sb.WriteString(styleHint.Render("  h toggle history   enter start   esc back"))
+	return sb.String()
+}
+
+func (m AppModel) handleEmergencyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.page = PageHome
+		return m, nil
+	case "h":
+		m.emergencyIgnoreHistory = !m.emergencyIgnoreHistory
+		return m, nil
+	case "enter":
+		base := strings.TrimSpace(m.configInput.Value())
+		if base != "" {
+			if _, err := configgen.Generate(base, []net.IP{net.ParseIP("104.18.0.1")}); err != nil {
+				m.statusMsg = fmt.Sprintf("Invalid base config: %v", err)
+				return m, nil
+			}
+		}
+		cfg := ScanConfig{Count: "1000", Concurrency: "50", Timeout: "5s", Tries: "2", Port: "443", Mode: "http", UseV4: true, UseV6: false, StopAfterHealthy: 10, Emergency: true, BaseConfig: base, IgnoreHistory: m.emergencyIgnoreHistory}
+		m.scanCfg = cfg
+		m.activeScanID = nextScanID()
+		m.statusMsg = "Emergency scan running; exports will be written in the current directory."
+		m.scanResults = nil
+		m.configResults = nil
+		m.scanDone = false
+		m.scanStats = StatsMsg{ScanID: m.activeScanID}
+		m.scanStarted = time.Now()
+		m.scanTotal = 1000
+		m.page = PageLiveScan
+		return m, StartScanCmd(cfg, m.activeScanID)
+	}
+	var cmd tea.Cmd
+	m.configInput, cmd = m.configInput.Update(msg)
+	return m, cmd
 }

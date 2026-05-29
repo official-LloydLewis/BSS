@@ -540,7 +540,7 @@ func (m AppModel) selectMenuItem() (tea.Model, tea.Cmd) {
 	case menuEmergency:
 		m.page = PageEmergencyScan
 		m.configInput.SetValue("")
-		m.configInput.Placeholder = "optional vless:// trojan:// or vmess:// config (Enter empty for IP-only)"
+		m.configInput.Placeholder = "vless://, trojan://, or vmess:// (optional)"
 		m.configInput.Focus()
 		m.configResults = nil
 		m.statusMsg = ""
@@ -1478,8 +1478,13 @@ func PrintColoTableBufWithWidth(sb *strings.Builder, results []*result.Result, w
 		bestIP string
 	}
 	byC := map[string]*cs{}
+	healthy := 0
 	for _, r := range results {
-		if !r.IsHealthy() || r.Colo == "" {
+		if !r.IsHealthy() {
+			continue
+		}
+		healthy++
+		if r.Colo == "" {
 			continue
 		}
 		s, ok := byC[r.Colo]
@@ -1495,6 +1500,7 @@ func PrintColoTableBufWithWidth(sb *strings.Builder, results []*result.Result, w
 		}
 	}
 	if len(byC) == 0 {
+		sb.WriteString(styleDim.Render(fmt.Sprintf("  Found 0 colos from %d healthy IPs\n", healthy)))
 		sb.WriteString(styleDim.Render("  No colos discovered yet…\n"))
 		return
 	}
@@ -1515,19 +1521,74 @@ func PrintColoTableBufWithWidth(sb *strings.Builder, results []*result.Result, w
 			rows[j], rows[j-1] = rows[j-1], rows[j]
 		}
 	}
-	ipWidth := minInt(39, width-42)
-	if ipWidth < 15 {
-		ipWidth = 15
-	}
-	separatorWidth := 41 + ipWidth
-	sb.WriteString(styleHeader.Render(fmt.Sprintf("  %-6s  %6s  %9s  %9s  %-*s\n",
-		"COLO", "COUNT", "AVG(ms)", "BEST(ms)", ipWidth, "BEST IP")))
-	sb.WriteString(styleSep.Render("  " + strings.Repeat("─", separatorWidth) + "\n"))
+
+	sb.WriteString(styleNormal.Render(fmt.Sprintf("  Found %d colos from %d healthy IPs\n\n", len(rows), healthy)))
+
+	headers := []string{"COLO", "COUNT", "AVG(ms)", "BEST(ms)", "BEST IP"}
+	data := make([][]string, 0, len(rows)+1)
+	data = append(data, headers)
 	for _, r := range rows {
-		line := fmt.Sprintf("  %-6s  %6d  %9.2f  %9d  %-*s\n",
-			r.colo, r.count, r.avgMs, r.bestMs, ipWidth, compactText(r.bestIP, ipWidth))
-		sb.WriteString(styleGood.Render(line))
+		data = append(data, []string{r.colo, fmt.Sprintf("%d", r.count), fmt.Sprintf("%.2f", r.avgMs), fmt.Sprintf("%d", r.bestMs), r.bestIP})
 	}
+
+	widths := coloTableColumnWidths(data, width)
+	for i, cells := range data {
+		line := renderFixedTableRow(cells, widths)
+		if i == 0 {
+			sb.WriteString(styleHeader.Render("  "+line) + "\n")
+			continue
+		}
+		sb.WriteString(styleGood.Render("  "+line) + "\n")
+	}
+}
+
+func coloTableColumnWidths(rows [][]string, termWidth int) []int {
+	minWidths := []int{1, 1, 1, 1, 1}
+	maxWidths := []int{4, 5, 7, 8, 39}
+	widths := append([]int(nil), minWidths...)
+	for _, row := range rows {
+		for i, cell := range row {
+			widths[i] = minInt(maxWidths[i], maxInt(widths[i], len(strings.TrimSpace(cell))))
+		}
+	}
+
+	available := termWidth - 2 // left padding added by caller.
+	if available < len(widths) {
+		available = len(widths)
+	}
+	for tableWidth(widths) > available {
+		shrunk := false
+		for _, idx := range []int{4, 3, 2, 1, 0} {
+			if widths[idx] > minWidths[idx] {
+				widths[idx]--
+				shrunk = true
+				break
+			}
+		}
+		if !shrunk {
+			break
+		}
+	}
+	return widths
+}
+
+func tableWidth(widths []int) int {
+	if len(widths) == 0 {
+		return 0
+	}
+	total := 0
+	for _, w := range widths {
+		total += w
+	}
+	return total + (len(widths)-1)*2
+}
+
+func renderFixedTableRow(cells []string, widths []int) string {
+	parts := make([]string, len(cells))
+	for i, cell := range cells {
+		parts[i] = fmt.Sprintf("%-*s", widths[i], compactText(cell, widths[i]))
+	}
+	return strings.Join(parts, "  ")
 }
 
 // ColoTable prints colo summary to stdout.
@@ -1555,6 +1616,13 @@ func tick() tea.Cmd {
 
 func minInt(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
@@ -2295,17 +2363,21 @@ func writeConfigDebugLog(generatedCount int, xrayAvailable bool, firstErr string
 
 func (m AppModel) viewEmergencyScan() string {
 	var sb strings.Builder
+	contentWidth := maxInt(1, minInt(m.width-4, 70))
+	inputWidth := maxInt(1, minInt(m.width-4, 80))
+	input := m.configInput
+	input.Width = inputWidth
+
 	sb.WriteString(styleTitle.Render("\n  🚨  Emergency Scan\n"))
-	sb.WriteString(fmt.Sprintf("%s\n\n", styleSep.Render("  "+strings.Repeat("─", minInt(m.width-4, 70)))))
-	sb.WriteString(styleNormal.Render("  Finds up to 10 healthy IPv4 Cloudflare IPs quickly and writes:\n"))
-	sb.WriteString(styleDim.Render("    good_ips.txt, ip_port.txt, generated_configs.txt (when config is provided)\n\n"))
-	sb.WriteString(styleHeader.Render("  Base config (optional)  "))
-	sb.WriteString(m.configInput.View() + "\n")
-	sb.WriteString(styleDim.Render("  Leave empty for IP-only emergency output. Supports vless://, trojan://, vmess:// generation.\n\n"))
+	sb.WriteString(fmt.Sprintf("%s\n\n", styleSep.Render("  "+strings.Repeat("─", contentWidth))))
+	sb.WriteString(styleNormal.Render("  "+compactText("Finds up to 10 healthy IPv4 Cloudflare IPs quickly.", contentWidth)) + "\n")
+	sb.WriteString(styleDim.Render("  "+compactText("Writes good_ips.txt, ip_port.txt, and config files when a base config is provided.", contentWidth)) + "\n\n")
+	sb.WriteString(styleHeader.Render("  Base config (optional)") + "\n")
+	sb.WriteString("  " + input.View() + "\n\n")
 	if m.statusMsg != "" {
-		sb.WriteString(styleWarn.Render("  "+m.statusMsg) + "\n\n")
+		sb.WriteString(styleWarn.Render("  "+compactText(m.statusMsg, contentWidth)) + "\n\n")
 	}
-	sb.WriteString(styleHint.Render("  enter start   esc back"))
+	sb.WriteString(styleHint.Render("  p paste | enter start | esc back"))
 	return sb.String()
 }
 
@@ -2315,6 +2387,10 @@ func (m AppModel) handleEmergencyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc":
 		m.page = PageHome
+		return m, nil
+	case "p", "ctrl+v":
+		m.configInput.Focus()
+		m = m.pasteConfigFromClipboard()
 		return m, nil
 	case "enter":
 		base := strings.TrimSpace(m.configInput.Value())

@@ -1,8 +1,8 @@
 # SenPai Scanner
 
-[![CI](https://github.com/matinsenpai/senpaiscanner/actions/workflows/ci.yml/badge.svg)](https://github.com/matinsenpai/senpaiscanner/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/matinsenpai/senpaiscanner?style=flat-square)](https://github.com/matinsenpai/senpaiscanner/releases/latest)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/matinsenpai/senpaiscanner?style=flat-square)](go.mod)
+[![CI](https://github.com/official-LloydLewis/SenPaiScanner/actions/workflows/ci.yml/badge.svg)](https://github.com/official-LloydLewis/SenPaiScanner/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/official-LloydLewis/SenPaiScanner?style=flat-square)](https://github.com/official-LloydLewis/SenPaiScanner/releases/latest)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/official-LloydLewis/SenPaiScanner?style=flat-square)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-informational?style=flat-square)](#installation)
 
@@ -41,7 +41,7 @@ The scanner:
 
 ### Pre-built binary
 
-Download from the [releases page](https://github.com/matinsenpai/senpaiscanner/releases/latest).
+Download from the [releases page](https://github.com/official-LloydLewis/SenPaiScanner/releases/latest).
 
 | Platform | Architecture | File |
 |---|---|---|
@@ -56,18 +56,18 @@ Download from the [releases page](https://github.com/matinsenpai/senpaiscanner/r
 stable release:
 ```bash
 
-curl -fsSL https://github.com/MatinSenPai/SenPaiScanner/raw/refs/heads/main/install.sh | bash
+curl -fsSL https://github.com/official-LloydLewis/SenPaiScanner/raw/refs/heads/main/install.sh | bash
 ```
 
 pre-release:
 ```bash
-curl -fsSL https://github.com/MatinSenPai/SenPaiScanner/raw/refs/heads/main/install.sh | bash -s -- --prerelease
+curl -fsSL https://github.com/official-LloydLewis/SenPaiScanner/raw/refs/heads/main/install.sh | bash -s -- --prerelease
 ```
 
 
 **Windows (PowerShell):**
 ```powershell
-$r = Invoke-RestMethod https://api.github.com/repos/matinsenpai/senpaiscanner/releases/latest
+$r = Invoke-RestMethod https://api.github.com/repos/official-LloydLewis/SenPaiScanner/releases/latest
 $url = ($r.assets | Where-Object name -like "*windows*x86_64*").browser_download_url
 Invoke-WebRequest $url -OutFile senpaiscanner.zip
 Expand-Archive senpaiscanner.zip .
@@ -76,7 +76,7 @@ Expand-Archive senpaiscanner.zip .
 ### From source
 
 ```bash
-go install github.com/matinsenpai/senpaiscanner/cmd/senpaiscanner@latest
+go install github.com/official-LloydLewis/SenPaiScanner/cmd/senpaiscanner@latest
 ```
 
 ---
@@ -157,7 +157,46 @@ A form where you configure:
 
 Navigate fields with Tab / Shift+Tab (or ↑/↓). Press Enter to start. Timeout accepts Go durations like `1500ms` or `5s`; a plain number is treated as seconds.
 
-Set **Output** to a path ending in `.csv`, `.json`, `.jsonl`, or `.txt` to stream results to disk during the scan. Quick Scan, Test IPs, and Discover Colos do not write files.
+Set **Output** to a path ending in `.csv`, `.json`, `.jsonl`, or `.txt` to stream results to disk during the scan. Unknown extensions are rejected instead of guessed. Quick Scan, Test IPs, and Discover Colos do not write files.
+
+
+#### Emergency Scan
+Emergency Scan is the fast, practical workflow for unstable/restricted networks. It uses minimal defaults so you can quickly get usable Cloudflare IPs without filling out a long form:
+
+| Setting | Emergency default |
+|---|---|
+| IP family | IPv4 only |
+| Count | 1,000 candidates |
+| Workers | 50 |
+| Timeout | 5s |
+| Tries | 2 |
+| Mode / port | HTTP on 443 |
+| Stop condition | stop after 10 healthy IPs |
+
+When you select **Emergency Scan**, you can either press Enter with an empty config field for IP-only output, or paste a base `vless://`, `trojan://`, or `vmess://` share URL. Only the server/address part is replaced; UUID/password, port, SNI, host, path, query parameters, and the name/fragment are preserved.
+
+Emergency Scan writes these files in the current working directory:
+
+| File | Contents |
+|---|---|
+| `good_ips.txt` | Healthy IPs, one per line |
+| `ip_port.txt` | Healthy candidates in `IP:PORT` form |
+| `generated_configs.txt` | All generated configs when a base config is provided |
+| `working_configs.txt` | Only configs that pass Xray validation |
+| `stable_configs.txt` | Only configs that pass the short 3/3 stability test |
+| `failed_configs.txt` | Generated configs that failed validation, when useful |
+
+Emergency Scan also maintains simple local history files:
+
+| File | Purpose |
+|---|---|
+| `good_ips.json` | Previously healthy IPs to retest first |
+| `bad_ips.json` | Recently repeated failures to skip by default |
+| `last_working.json` | Last working IP/config set |
+
+Press `h` on the Emergency Scan setup screen to toggle history behavior. The default uses history (retest known-good IPs first and skip repeated recent failures). Use **ignore history** when the network is unstable and previously bad IPs may have become usable again.
+
+If an `xray` binary is available on `PATH`, Emergency Scan validates generated VLESS/Trojan configs through Xray before writing `working_configs.txt`, then runs a short stability check before writing `stable_configs.txt`. If Xray is missing or unavailable, the scan does not crash: `generated_configs.txt` is still written and validation-only files remain empty or contain only validated results. VMess configs are generated for import, but automated Xray validation currently focuses on VLESS/Trojan share URLs.
 
 #### Test IPs
 Put IPs in `ips.txt` in the **current working directory** (one per line, or CSV with IP in the first column) **before** you select this menu item. The scan **starts as soon as you choose Test IPs** from the menu.
@@ -187,7 +226,7 @@ Version string and short project blurb; `Enter` / `q` / `Esc` back to the menu.
 
 ## Output formats
 
-Only **Custom Scan** writes a file, when **Output** is set. Rows are appended in real time as results arrive.
+**Custom Scan** writes a file when **Output** is set. Rows are appended in real time as results arrive. **Emergency Scan** always writes its practical rescue files (`good_ips.txt`, `ip_port.txt`, and config files when applicable) in the current working directory.
 
 **CSV** (`.csv`):
 ```
@@ -247,7 +286,7 @@ Embedded directly from Cloudflare's official published lists (`cloudflare.com/ip
 ## Building from source
 
 ```bash
-git clone https://github.com/matinsenpai/senpaiscanner.git
+git clone https://github.com/official-LloydLewis/SenPaiScanner.git
 cd senpaiscanner
 make build          # current platform
 make build-all      # all platforms → dist/

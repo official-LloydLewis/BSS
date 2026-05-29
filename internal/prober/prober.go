@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
 )
 
 // sniHostnames is a list of well-known Cloudflare hostnames used as SNI values.
@@ -32,6 +32,7 @@ type Config struct {
 	Timeout    time.Duration
 	SNI        string // empty = rotate automatically
 	SpeedBytes int64  // optional HTTP download sample size; 0 disables it
+	WSTest     bool   // optional WebSocket hold test; disabled for fast scans by default
 }
 
 // Mode selects the probe type.
@@ -105,7 +106,7 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 			lat, tlsOk = probeTLS(ctx, ip, cfg.Port, sni, cfg.Timeout)
 		case ModeHTTP:
 			var wsOk bool
-			lat, tlsOk, httpStatus, colo, throughput, wsOk = probeHTTP(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.SpeedBytes)
+			lat, tlsOk, httpStatus, colo, throughput, wsOk = probeHTTP(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.SpeedBytes, cfg.WSTest)
 			if wsOk {
 				r.WSOk = true
 			}
@@ -184,7 +185,7 @@ func probeTLS(ctx context.Context, ip net.IP, port int, sni string, timeout time
 
 // probeHTTP fetches /cdn-cgi/trace to confirm the IP is a real Cloudflare edge
 // and to determine the colo identifier.
-func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout time.Duration, speedBytes int64) (
+func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout time.Duration, speedBytes int64, wsTest bool) (
 	lat time.Duration, tlsOk bool, httpStatus int, colo string, throughput float64, wsOk bool,
 ) {
 	addr := fmt.Sprintf("%s:%d", ip.String(), port)
@@ -242,8 +243,8 @@ func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout tim
 		throughput = probeDownload(ctx, ip, port, timeout, speedBytes)
 	}
 
-	// WebSocket hold test — only if HTTP succeeded and we have a colo
-	if httpStatus >= 200 && httpStatus < 400 && colo != "" {
+	// Optional WebSocket hold test — skipped in fast scans and on port 80.
+	if wsTest && port != 80 && httpStatus >= 200 && httpStatus < 400 && colo != "" {
 		wsOk = probeWebSocket(ctx, ip, port, sni, timeout)
 	}
 
@@ -300,8 +301,12 @@ func probeWebSocket(ctx context.Context, ip net.IP, port int, sni string, timeou
 		return false
 	}
 
-	// Hold connection for 2 seconds to detect DPI killing it
-	time.Sleep(2 * time.Second)
+	// Hold connection briefly to detect DPI killing it without slowing scans too much.
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(500 * time.Millisecond):
+	}
 
 	// Try to write again - if connection was RST'd, this will fail
 	tlsConn.SetDeadline(time.Now().Add(2 * time.Second))

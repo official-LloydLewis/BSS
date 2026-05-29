@@ -15,14 +15,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/official-LloydLewis/SenPaiScanner/internal/configgen"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/engine"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/history"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/ipsrc"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/output"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/prober"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/xraytest"
+	"github.com/matinsenpai/senpaiscanner/internal/configgen"
+	"github.com/matinsenpai/senpaiscanner/internal/engine"
+	"github.com/matinsenpai/senpaiscanner/internal/history"
+	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
+	"github.com/matinsenpai/senpaiscanner/internal/output"
+	"github.com/matinsenpai/senpaiscanner/internal/prober"
+	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
 )
 
 type scanManager struct {

@@ -6,8 +6,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/official-LloydLewis/SenPaiScanner/internal/ui"
-	"github.com/official-LloydLewis/SenPaiScanner/pkg/version"
+	"github.com/matinsenpai/senpaiscanner/internal/ui"
+	"github.com/matinsenpai/senpaiscanner/pkg/version"
 )
 
 func main() {

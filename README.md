@@ -1,8 +1,8 @@
 # SenPai Scanner
 
-[![CI](https://github.com/official-LloydLewis/SenPaiScanner/actions/workflows/ci.yml/badge.svg)](https://github.com/official-LloydLewis/SenPaiScanner/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/official-LloydLewis/SenPaiScanner?style=flat-square)](https://github.com/official-LloydLewis/SenPaiScanner/releases/latest)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/official-LloydLewis/SenPaiScanner?style=flat-square)](go.mod)
+[![CI](https://github.com/matinsenpai/senpaiscanner/actions/workflows/ci.yml/badge.svg)](https://github.com/matinsenpai/senpaiscanner/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/matinsenpai/senpaiscanner?style=flat-square)](https://github.com/matinsenpai/senpaiscanner/releases/latest)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/matinsenpai/senpaiscanner?style=flat-square)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-informational?style=flat-square)](#installation)
 
@@ -41,7 +41,7 @@ The scanner:
 
 ### Pre-built binary
 
-Download from the [releases page](https://github.com/official-LloydLewis/SenPaiScanner/releases/latest).
+Download from the [releases page](https://github.com/matinsenpai/senpaiscanner/releases/latest).
 
 | Platform | Architecture | File |
 |---|---|---|
@@ -56,18 +56,18 @@ Download from the [releases page](https://github.com/official-LloydLewis/SenPaiS
 stable release:
 ```bash
 
-curl -fsSL https://github.com/official-LloydLewis/SenPaiScanner/raw/refs/heads/main/install.sh | bash
+curl -fsSL https://github.com/matinsenpai/senpaiscanner/raw/refs/heads/main/install.sh | bash
 ```
 
 pre-release:
 ```bash
-curl -fsSL https://github.com/official-LloydLewis/SenPaiScanner/raw/refs/heads/main/install.sh | bash -s -- --prerelease
+curl -fsSL https://github.com/matinsenpai/senpaiscanner/raw/refs/heads/main/install.sh | bash -s -- --prerelease
 ```
 
 
 **Windows (PowerShell):**
 ```powershell
-$r = Invoke-RestMethod https://api.github.com/repos/official-LloydLewis/SenPaiScanner/releases/latest
+$r = Invoke-RestMethod https://api.github.com/repos/matinsenpai/senpaiscanner/releases/latest
 $url = ($r.assets | Where-Object name -like "*windows*x86_64*").browser_download_url
 Invoke-WebRequest $url -OutFile senpaiscanner.zip
 Expand-Archive senpaiscanner.zip .
@@ -76,7 +76,7 @@ Expand-Archive senpaiscanner.zip .
 ### From source
 
 ```bash
-go install github.com/official-LloydLewis/SenPaiScanner/cmd/senpaiscanner@latest
+go install github.com/matinsenpai/senpaiscanner/cmd/senpaiscanner@latest
 ```
 
 ---
@@ -286,7 +286,7 @@ Embedded directly from Cloudflare's official published lists (`cloudflare.com/ip
 ## Building from source
 
 ```bash
-git clone https://github.com/official-LloydLewis/SenPaiScanner.git
+git clone https://github.com/matinsenpai/senpaiscanner.git
 cd senpaiscanner
 make build          # current platform
 make build-all      # all platforms → dist/

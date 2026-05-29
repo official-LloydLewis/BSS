@@ -15,14 +15,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/official-LloydLewis/SenPaiScanner/internal/banner"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/config"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/configgen"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/engine"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/ipsrc"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/prober"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/xraytest"
+	"github.com/matinsenpai/senpaiscanner/internal/banner"
+	"github.com/matinsenpai/senpaiscanner/internal/config"
+	"github.com/matinsenpai/senpaiscanner/internal/configgen"
+	"github.com/matinsenpai/senpaiscanner/internal/engine"
+	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
+	"github.com/matinsenpai/senpaiscanner/internal/prober"
+	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
 )
 
 // ---------------------------------------------------------------------------
@@ -1411,7 +1411,7 @@ func (m AppModel) viewAbout() string {
 	sb.WriteString(styleNormal.Render("  jitter, and identifies the colo (PoP) behind each IP."))
 	sb.WriteString("\n\n")
 
-	sb.WriteString(styleDim.Render("  github.com/official-LloydLewis/SenPaiScanner"))
+	sb.WriteString(styleDim.Render("  github.com/matinsenpai/senpaiscanner"))
 	sb.WriteString("\n\n")
 	sb.WriteString(styleHint.Render("  enter/q → back"))
 	return sb.String()

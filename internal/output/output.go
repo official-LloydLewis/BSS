@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
+	"github.com/matinsenpai/senpaiscanner/internal/result"
 )
 
 // Format identifies the output format.

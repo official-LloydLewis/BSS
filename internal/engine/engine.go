@@ -17,8 +17,7 @@ import (
 type Config struct {
 	Concurrency      int
 	RateLimit        float64 // probes per second, <=0 means unlimited
-	StopAfterHealthy int     // cancel once this many final-accepted healthy results are found; <=0 disables
-	StopHealthyFunc  func(*result.Result) bool
+	StopAfterHealthy int     // cancel once this many healthy results are found; <=0 disables
 	ProbeConfig      prober.Config
 }
 
@@ -109,8 +108,8 @@ func (e *Engine) Run(ctx context.Context, src <-chan net.IP, fn ResultFunc) {
 				r := prober.Probe(ctx, ip, e.cfg.ProbeConfig)
 				e.stats.Tested.Add(1)
 				if r.IsHealthy() {
-					e.stats.Healthy.Add(1)
-					if e.shouldStopAfter(r) {
+					healthy := e.stats.Healthy.Add(1)
+					if e.cfg.StopAfterHealthy > 0 && healthy >= int64(e.cfg.StopAfterHealthy) {
 						if canceler, ok := ctx.Value(cancelKey{}).(context.CancelFunc); ok {
 							canceler()
 						}

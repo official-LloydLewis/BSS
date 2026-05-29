@@ -15,14 +15,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/official-LloydLewis/SenPaiScanner/internal/configgen"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/engine"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/history"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/ipsrc"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/output"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/prober"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/result"
-	"github.com/official-LloydLewis/SenPaiScanner/internal/xraytest"
+	"github.com/matinsenpai/senpaiscanner/internal/configgen"
+	"github.com/matinsenpai/senpaiscanner/internal/engine"
+	"github.com/matinsenpai/senpaiscanner/internal/history"
+	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
+	"github.com/matinsenpai/senpaiscanner/internal/output"
+	"github.com/matinsenpai/senpaiscanner/internal/prober"
+	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
 )
 
 type scanManager struct {
@@ -152,14 +152,13 @@ func runScan(cfg ScanConfig, scanID int64) {
 	defer scans.Clear(cancel)
 	defer cancel()
 
-	coloSet := buildColoSet(cfg.ColoFilter)
-
+	engineStopAfter := cfg.StopAfterHealthy
+	if strings.TrimSpace(cfg.ColoFilter) != "" {
+		engineStopAfter = 0
+	}
 	engCfg := engine.Config{
 		Concurrency:      concurrency,
-		StopAfterHealthy: cfg.StopAfterHealthy,
-		StopHealthyFunc: func(r *result.Result) bool {
-			return passesColoFilter(r, coloSet)
-		},
+		StopAfterHealthy: engineStopAfter,
 		ProbeConfig: prober.Config{
 			Port:       port,
 			Mode:       mode,
@@ -172,6 +171,8 @@ func runScan(cfg ScanConfig, scanID int64) {
 	}
 	eng := engine.New(engCfg)
 
+	coloSet := buildColoSet(cfg.ColoFilter)
+	var healthyForStop atomic.Int64
 	var resultsMu sync.Mutex
 	var goodIPs []string
 	var badIPs []string
@@ -191,7 +192,7 @@ func runScan(cfg ScanConfig, scanID int64) {
 
 	ipStream := src.Stream(ctx, count)
 	if cfg.Emergency {
-		ipStream = emergencyIPStream(ctx, src, count, cfg.IgnoreHistory)
+		ipStream = emergencyIPStream(ctx, src, count)
 	}
 	eng.Run(ctx, ipStream, func(r *result.Result) {
 		if prog != nil {
@@ -205,6 +206,9 @@ func runScan(cfg ScanConfig, scanID int64) {
 			resultsMu.Lock()
 			goodIPs = append(goodIPs, r.IP.String())
 			resultsMu.Unlock()
+			if cfg.StopAfterHealthy > 0 && healthyForStop.Add(1) >= int64(cfg.StopAfterHealthy) {
+				cancel()
+			}
 		} else if cfg.Emergency {
 			resultsMu.Lock()
 			badIPs = append(badIPs, r.IP.String())
@@ -411,17 +415,14 @@ func parseTimeout(raw string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-func emergencyIPStream(ctx context.Context, src *ipsrc.Source, count int, ignoreHistory bool) <-chan net.IP {
+func emergencyIPStream(ctx context.Context, src *ipsrc.Source, count int) <-chan net.IP {
 	out := make(chan net.IP, 64)
 	go func() {
 		defer close(out)
 		sent := 0
 		seen := map[string]struct{}{}
-		var bad, good []history.IPRecord
-		if !ignoreHistory {
-			bad, _ = history.LoadBad(".")
-			good, _ = history.LoadGood(".")
-		}
+		bad, _ := history.LoadBad(".")
+		good, _ := history.LoadGood(".")
 		for _, rec := range good {
 			if count > 0 && sent >= count {
 				return
@@ -509,14 +510,14 @@ func validateEmergencyConfigs(scanID int64, configs []string) (working, failed, 
 	}
 	for i := 0; i < limit; i++ {
 		raw := configs[i]
-		ctx := context.Background()
-		validate, err := validatorForShare(raw)
+		cfg, err := xraytest.ParseVLESS(raw)
 		if err != nil {
 			failed = append(failed, raw)
-			sendError(scanID, fmt.Sprintf("Xray validation skipped: %v", err))
+			sendError(scanID, "Xray validation skipped for non-VLESS configs; generated_configs.txt was still written")
 			continue
 		}
-		vr := validate(ctx, 20*time.Second)
+		ctx := context.Background()
+		vr := xraytest.ValidateConfig(ctx, cfg, 20*time.Second)
 		if prog != nil {
 			prog.Send(ConfigProgressMsg{Result: vr, Done: i + 1, Total: limit})
 		}
@@ -528,7 +529,7 @@ func validateEmergencyConfigs(scanID int64, configs []string) (working, failed, 
 		successes := 1
 		for attempt := 1; attempt < 3; attempt++ {
 			time.Sleep(500 * time.Millisecond)
-			if validate(ctx, 15*time.Second).Success {
+			if xraytest.ValidateConfig(ctx, cfg, 15*time.Second).Success {
 				successes++
 			}
 		}
@@ -537,30 +538,4 @@ func validateEmergencyConfigs(scanID int64, configs []string) (working, failed, 
 		}
 	}
 	return working, failed, stable
-}
-
-type shareValidator func(context.Context, time.Duration) *xraytest.ValidationResult
-
-func validatorForShare(raw string) (shareValidator, error) {
-	lower := strings.ToLower(strings.TrimSpace(raw))
-	switch {
-	case strings.HasPrefix(lower, "vless://"):
-		cfg, err := xraytest.ParseVLESS(raw)
-		if err != nil {
-			return nil, err
-		}
-		return func(ctx context.Context, timeout time.Duration) *xraytest.ValidationResult {
-			return xraytest.ValidateConfig(ctx, cfg, timeout)
-		}, nil
-	case strings.HasPrefix(lower, "trojan://"):
-		cfg, err := xraytest.ParseTrojan(raw)
-		if err != nil {
-			return nil, err
-		}
-		return func(ctx context.Context, timeout time.Duration) *xraytest.ValidationResult {
-			return xraytest.ValidateTrojanConfig(ctx, cfg, timeout)
-		}, nil
-	default:
-		return nil, fmt.Errorf("unsupported validation protocol (supported: vless, trojan)")
-	}
 }

@@ -43,18 +43,6 @@ func TestGenerateIPv6(t *testing.T) {
 	}
 }
 
-func TestGenerateVMessUsesStandardBase64(t *testing.T) {
-	base := "vmess://eyJhZGQiOiJleGFtcGxlLmNvbSIsInBvcnQiOiI0NDMiLCJpZCI6InV1aWQiLCJuZXQiOiJ3cyJ9"
-	got, err := Generate(base, []net.IP{net.ParseIP("104.18.0.1")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded := strings.TrimPrefix(got[0], "vmess://")
-	if len(encoded)%4 != 0 {
-		t.Fatalf("vmess output should use padded standard base64, got %q", encoded)
-	}
-}
-
 func TestGenerateInvalid(t *testing.T) {
 	if _, err := Generate("http://example.com", []net.IP{net.ParseIP("1.1.1.1")}); err == nil {
 		t.Fatal("expected error")

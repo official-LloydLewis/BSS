@@ -12,6 +12,7 @@ const (
 	PageColos
 	PageLiveColos
 	PageAbout
+	PageEmergencyScan  // emergency IP/config workflow
 	PageScanWithConfig // xray config - URL input
 	PageConfigSetup    // xray config - count/topN setup
 	PageConfigPhase1   // xray config - fast connectivity scan

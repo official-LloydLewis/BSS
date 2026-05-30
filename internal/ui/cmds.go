@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/matinsenpai/senpaiscanner/internal/output"
 	"github.com/matinsenpai/senpaiscanner/internal/prober"
 	"github.com/matinsenpai/senpaiscanner/internal/result"
+	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
 )
 
 // scanCancel holds the cancel function for the active scan so the TUI can
@@ -117,12 +120,13 @@ func runScan(cfg ScanConfig, scanID int64) {
 	engCfg := engine.Config{
 		Concurrency: concurrency,
 		ProbeConfig: prober.Config{
-			Port:       port,
-			Mode:       mode,
-			Tries:      tries,
-			Timeout:    timeout,
-			SNI:        cfg.SNI,
-			SpeedBytes: speedSampleForMode(mode),
+			Port:             port,
+			Mode:             mode,
+			Tries:            tries,
+			Timeout:          timeout,
+			SNI:              cfg.SNI,
+			SpeedBytes:       speedSampleForMode(mode),
+			RequireWebSocket: mode == prober.ModeHTTP && speedSampleForMode(mode) > 0,
 		},
 	}
 	eng := engine.New(engCfg)
@@ -184,12 +188,13 @@ func runTest(ipFile string, scanID int64) {
 	engCfg := engine.Config{
 		Concurrency: 20,
 		ProbeConfig: prober.Config{
-			Port:       443,
-			Mode:       prober.ModeHTTP,
-			Tries:      6,
-			Timeout:    10 * time.Second,
-			SNI:        "speed.cloudflare.com",
-			SpeedBytes: 512 * 1024,
+			Port:             443,
+			Mode:             prober.ModeHTTP,
+			Tries:            6,
+			Timeout:          10 * time.Second,
+			SNI:              "speed.cloudflare.com",
+			SpeedBytes:       512 * 1024,
+			RequireWebSocket: true,
 		},
 	}
 	eng := engine.New(engCfg)
@@ -268,21 +273,21 @@ func sendColosDone(scanID int64) {
 // that finds healthy Cloudflare IPs (or validates IPs from a file), then signals
 // the UI to start Phase 2 (xray validation) with the best candidates.
 func runConfigPhase1(opts configPhase1Options) {
+	probeCfg, err := configProbeFromURL(opts.rawURL, opts.timeout)
+	if err != nil {
+		if prog != nil {
+			prog.Send(ConfigPhase1ErrMsg{Err: fmt.Sprintf("invalid URL: %v", err)})
+		}
+		return
+	}
+	ports := opts.ports
+	if len(ports) == 0 {
+		ports = []int{probeCfg.Port}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	scanCancel = cancel
 	defer cancel()
-
-	engCfg := engine.Config{
-		Concurrency: opts.concurrency,
-		ProbeConfig: prober.Config{
-			Port:       443,
-			Mode:       prober.ModeHTTP,
-			Tries:      2,
-			Timeout:    opts.timeout,
-			SpeedBytes: 0, // Phase 1 is connectivity-only; no download test
-		},
-	}
-	eng := engine.New(engCfg)
 
 	callback := func(r *result.Result) {
 		if prog != nil {
@@ -290,11 +295,12 @@ func runConfigPhase1(opts configPhase1Options) {
 		}
 	}
 
+	var ipStream <-chan net.IP
 	if opts.fromFile {
-		ips, err := loadIPs("ips.txt")
+		ips, err := loadDefaultIPsFile()
 		if err != nil {
 			if prog != nil {
-				prog.Send(ConfigPhase1ErrMsg{Err: "ips.txt not found — place it next to the binary"})
+				prog.Send(ConfigPhase1ErrMsg{Err: err.Error()})
 			}
 			return
 		}
@@ -304,7 +310,12 @@ func runConfigPhase1(opts configPhase1Options) {
 			}
 			return
 		}
-		eng.RunList(ctx, ips, callback)
+		ch := make(chan net.IP, len(ips))
+		for _, ip := range ips {
+			ch <- ip
+		}
+		close(ch)
+		ipStream = ch
 	} else {
 		src, err := ipsrc.New(true, false, nil)
 		if err != nil {
@@ -313,13 +324,80 @@ func runConfigPhase1(opts configPhase1Options) {
 			}
 			return
 		}
-		ipStream := src.Stream(ctx, opts.count)
-		eng.Run(ctx, ipStream, callback)
+		ipStream = src.Stream(ctx, opts.count)
 	}
+	runConfigPortProbes(ctx, ipStream, ports, opts.concurrency, probeCfg, callback)
 
 	if prog != nil {
 		prog.Send(ConfigPhase1DoneMsg{})
 	}
+}
+
+type configProbeJob struct {
+	ip   net.IP
+	port int
+}
+
+func runConfigPortProbes(ctx context.Context, ips <-chan net.IP, ports []int, concurrency int, base prober.Config, callback func(*result.Result)) {
+	if concurrency <= 0 {
+		concurrency = 50
+	}
+	jobs := make(chan configProbeJob, concurrency)
+	var wg sync.WaitGroup
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				callback(prober.Probe(ctx, job.ip, base.WithPort(job.port)))
+			}
+		}()
+	}
+
+	for ip := range ips {
+		for _, port := range ports {
+			select {
+			case <-ctx.Done():
+				close(jobs)
+				wg.Wait()
+				return
+			case jobs <- configProbeJob{ip: ip, port: port}:
+			}
+		}
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func configProbeFromURL(rawURL string, timeout time.Duration) (prober.Config, error) {
+	cfg, err := xraytest.ParseProxyURL(rawURL)
+	if err != nil {
+		return prober.Config{}, err
+	}
+
+	sni := cfg.SNI
+	if sni == "" {
+		sni = cfg.Host
+	}
+
+	probeCfg := prober.Config{
+		Port:               cfg.Port,
+		Mode:               prober.ModeHTTP,
+		Tries:              3,
+		Timeout:            timeout,
+		SNI:                sni,
+		InsecureSkipVerify: true,
+	}
+	if cfg.Network == "ws" {
+		probeCfg.WebSocketHost = cfg.Host
+		probeCfg.WebSocketPath = cfg.Path
+		probeCfg.RequireWebSocket = true
+	}
+	return probeCfg, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +423,39 @@ func passesColoFilter(r *result.Result, set map[string]bool) bool {
 		return true
 	}
 	return set[strings.ToUpper(r.Colo)]
+}
+
+func ipsFileSearchPaths() []string {
+	seen := make(map[string]struct{})
+	add := func(paths *[]string, path string) {
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		*paths = append(*paths, path)
+	}
+
+	var paths []string
+	if wd, err := os.Getwd(); err == nil {
+		add(&paths, filepath.Join(wd, "ips.txt"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		add(&paths, filepath.Join(filepath.Dir(exe), "ips.txt"))
+	}
+	return paths
+}
+
+func loadDefaultIPsFile() ([]net.IP, error) {
+	for _, path := range ipsFileSearchPaths() {
+		ips, err := loadIPs(path)
+		if err == nil {
+			return ips, nil
+		}
+	}
+	return nil, fmt.Errorf("ips.txt not found — place it next to the binary or run folder")
 }
 
 func loadIPs(path string) ([]net.IP, error) {

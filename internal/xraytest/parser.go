@@ -157,6 +157,14 @@ func (c *VLESSConfig) WithAddress(newAddr string) *VLESSConfig {
 	return &copy
 }
 
+// WithEndpoint returns a copy of the config with the address and port replaced.
+func (c *VLESSConfig) WithEndpoint(newAddr string, newPort int) *VLESSConfig {
+	copy := *c
+	copy.Address = newAddr
+	copy.Port = newPort
+	return &copy
+}
+
 // ToShareURL reconstructs a vless:// share URL from the config.
 func (c *VLESSConfig) ToShareURL() string {
 	params := url.Values{}

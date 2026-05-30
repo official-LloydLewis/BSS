@@ -111,6 +111,36 @@ func TestHTTPHealthRequiresCloudflareValidation(t *testing.T) {
 	}
 }
 
+func TestHTTPHealthRequiresTLSOnNonPlainHTTPPorts(t *testing.T) {
+	r := makeResult([]time.Duration{100 * time.Millisecond})
+	r.ProbeMode = "http"
+	r.Port = 2087
+	r.TLSOk = false
+	r.HTTPStatus = 200
+	r.Colo = "FRA"
+
+	if r.IsHealthy() {
+		t.Fatal("expected HTTPS-style port without TLS to be unhealthy")
+	}
+}
+
+func TestHTTPHealthRequiresWebSocketWhenConfigured(t *testing.T) {
+	r := makeResult([]time.Duration{100 * time.Millisecond})
+	r.ProbeMode = "http"
+	r.HTTPStatus = 200
+	r.Colo = "FRA"
+	r.RequireWS = true
+
+	if r.IsHealthy() {
+		t.Fatal("expected required websocket failure to be unhealthy")
+	}
+
+	r.WSOk = true
+	if !r.IsHealthy() {
+		t.Fatal("expected required websocket success to be healthy")
+	}
+}
+
 func TestHTTPTimeoutIsNotHealthy(t *testing.T) {
 	// Simulates the bug: all tries time out (latency 0) or previously recorded 3s.
 	r := &Result{

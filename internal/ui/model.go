@@ -3,6 +3,8 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -222,7 +224,7 @@ type AppModel struct {
 	configURL      string
 	configCountIdx int // index into configCountValues
 	configTopNIdx  int // index into configTopNValues
-	configSetupRow int // 0=URL, 1=count, 2=workers, 3=timeout, 4=ipMode, 5=topN
+	configSetupRow int // 0=URL, 1=source, 2=count, 3=workers, 4=timeout, 5=ports
 	// quick-scan-style pickers for Phase 1
 	configWorkersIdx    int
 	configTimeoutIdx    int
@@ -233,6 +235,8 @@ type AppModel struct {
 	configCountCustom   string // value when Custom count is selected
 	configWorkersCustom string // value when Custom workers is selected
 	configTimeoutCustom string // value when Custom timeout is selected
+	configPortFocus     int
+	configSelectedPorts map[int]bool
 	// phase 1 state
 	configPhase1Results []*result.Result
 	configPhase1Done    bool
@@ -250,11 +254,7 @@ type menuEntry struct {
 }
 
 var menuEntries = []menuEntry{
-	{"Quick Scan", "scan random Cloudflare IPs"},
-	{"Custom Scan", "configure count, mode, CIDR, output…"},
-	{"Scan with Config", "test IPs with your VLESS/xray config"},
-	{"Test IPs", "deep-test a list of IPs from file"},
-	{"Discover Colos", "find reachable Cloudflare PoPs"},
+	{"Find Working IPs", "paste a config and test random Cloudflare IPs"},
 	{"About", ""},
 	{"Quit", ""},
 }
@@ -262,13 +262,9 @@ var menuEntries = []menuEntry{
 const menuLabelWidth = 16
 
 const (
-	menuQuickScan      = 0
-	menuCustomScan     = 1
-	menuScanWithConfig = 2
-	menuTestIPs        = 3
-	menuColos          = 4
-	menuAbout          = 5
-	menuQuit           = 6
+	menuFindWorking = 0
+	menuAbout       = 1
+	menuQuit        = 2
 )
 
 var modes = []string{"tls", "tcp", "http"}
@@ -296,6 +292,8 @@ func NewApp(version string) AppModel {
 		height:           40,
 		scanStarted:      time.Now(),
 		quickCustomInput: customInput,
+		configWorkersIdx: 0,
+		configTimeoutIdx: 2,
 	}
 
 	// Config input for "Scan with Config"
@@ -529,23 +527,7 @@ func (m AppModel) handleHomeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m AppModel) selectMenuItem() (tea.Model, tea.Cmd) {
 	switch m.menuIdx {
-	case menuQuickScan:
-		m.quickRow = qRowCount
-		m.quickCountIdx = 0
-		m.quickWorkersIdx = 0 // default: 50 (safe for restricted networks)
-		m.quickTimeoutIdx = 2 // default: 5s (recommended for restricted networks)
-		m.quickCustomMode = false
-		m.quickCustomInput.SetValue("")
-		m.quickCustomInput.Blur()
-		m.scanCfg = defaultScanConfig() // clear any stale custom values
-		m.statusMsg = ""
-		m.page = PageQuickScanCount
-		return m, textinput.Blink
-	case menuCustomScan:
-		m.statusMsg = ""
-		m.buildFormInputs()
-		m.page = PageScanConfig
-	case menuScanWithConfig:
+	case menuFindWorking:
 		m.page = PageScanWithConfig
 		m.configInput.SetValue("")
 		m.configInput.Focus()
@@ -553,11 +535,13 @@ func (m AppModel) selectMenuItem() (tea.Model, tea.Cmd) {
 		m.configScanning = false
 		m.configDone = false
 		m.configSetupRow = 0
-		m.configCountIdx = 1 // default: 5,000
-		m.configTopNIdx = 0  // default: 10
-		m.configWorkersIdx = 0  // default: 50 workers (restricted-net safe)
-		m.configTimeoutIdx = 2  // default: 5s
-		m.configIPMode = 0      // default: random Cloudflare IPs
+		m.configCountIdx = 1   // default: 5,000
+		m.configTopNIdx = 2    // hidden default: validate top 50 precheck hits
+		m.configWorkersIdx = 0 // default: 50 workers (restricted-net safe)
+		m.configTimeoutIdx = 2 // default: 5s
+		m.configIPMode = 0     // default: random Cloudflare IPs
+		m.configPortFocus = 0
+		m.configSelectedPorts = nil
 		m.configCustomMode = false
 		m.configCountCustom = ""
 		m.configWorkersCustom = ""
@@ -566,23 +550,6 @@ func (m AppModel) selectMenuItem() (tea.Model, tea.Cmd) {
 		m.configCustomInput.Blur()
 		m.statusMsg = ""
 		return m, textinput.Blink
-	case menuTestIPs:
-		m.statusMsg = "Place IPs in 'ips.txt' (one per line) before selecting Test IPs"
-		m.activeScanID = nextScanID()
-		m.scanResults = nil
-		m.scanDone = false
-		m.scanStats = StatsMsg{ScanID: m.activeScanID}
-		m.scanStarted = time.Now()
-		m.scanTotal = 0
-		m.page = PageLiveScan
-		return m, StartTestCmd("ips.txt", m.activeScanID)
-	case menuColos:
-		m.activeScanID = nextScanID()
-		m.colosResults = nil
-		m.colosDone = false
-		m.scanStats = StatsMsg{ScanID: m.activeScanID}
-		m.page = PageLiveColos
-		return m, StartColosCmd(m.activeScanID)
 	case menuAbout:
 		m.page = PageAbout
 	case menuQuit:
@@ -901,7 +868,7 @@ func (m AppModel) handleLiveScanKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.page = PageResults
 		}
 	case "c":
-		m.statusMsg = m.copyHealthyIPsToClipboard()
+		m.statusMsg = "use Find Working IPs to copy config-tested IPs"
 	}
 	return m, nil
 }
@@ -917,10 +884,12 @@ func (m AppModel) handleResultsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sortBy = result.SortBy(m.sortIdx)
 		result.Sort(m.scanResults, m.sortBy)
 	case "c":
-		m.statusMsg = m.copyHealthyIPsToClipboard()
+		m.statusMsg = "use Find Working IPs to copy config-tested IPs"
 	}
 	return m, nil
 }
+
+var clipboardWriteAll = clipboard.WriteAll
 
 // copyHealthyIPsToClipboard writes one IP per line to the system clipboard
 // and returns a short status message to display to the user.
@@ -938,6 +907,119 @@ func (m AppModel) copyHealthyIPsToClipboard() string {
 		return fmt.Sprintf("clipboard error: %v", err)
 	}
 	return fmt.Sprintf("✓ copied %d IPs to clipboard", len(top))
+}
+
+func (m AppModel) copyWorkingIPs() string {
+	endpoints := workingEndpoints(m.configResults)
+	if len(endpoints) == 0 {
+		return "no working endpoints to copy"
+	}
+	return copyAndSaveIPs(endpoints)
+}
+
+func workingIPs(results []*xraytest.ValidationResult) []string {
+	return workingEndpoints(results)
+}
+
+func workingEndpoints(results []*xraytest.ValidationResult) []string {
+	var endpoints []string
+	seen := make(map[string]struct{})
+	for _, r := range results {
+		if r == nil || !r.Success || r.IP == "" {
+			continue
+		}
+		endpoint := formatEndpoint(r.IP, r.Port)
+		if _, ok := seen[endpoint]; ok {
+			continue
+		}
+		seen[endpoint] = struct{}{}
+		endpoints = append(endpoints, endpoint)
+	}
+	return endpoints
+}
+
+func formatEndpoint(ip string, port int) string {
+	if port <= 0 {
+		return ip
+	}
+	return fmt.Sprintf("%s:%d", ip, port)
+}
+
+func formatValidationSpeed(throughput float64) string {
+	if throughput <= 0 {
+		return "n/a"
+	}
+	mbps := throughput * 8 / 1_000_000
+	if mbps >= 100 {
+		return fmt.Sprintf("%.0f Mbps", mbps)
+	}
+	return fmt.Sprintf("%.1f Mbps", mbps)
+}
+
+func formatValidationLatency(latency time.Duration) string {
+	if latency <= 0 {
+		return "—"
+	}
+	ms := latency.Milliseconds()
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", latency.Seconds())
+}
+
+func copyAndSaveIPs(ips []string) string {
+	text := strings.Join(ips, "\n") + "\n"
+	clipErr := clipboardWriteAll(text)
+	path, fileErr := writeIPsBesideExecutable(ips)
+
+	switch {
+	case clipErr == nil && fileErr == nil:
+		return fmt.Sprintf("copied %d working endpoints; saved to %s", len(ips), path)
+	case clipErr != nil && fileErr == nil:
+		return fmt.Sprintf("clipboard failed; saved %d working endpoints to %s", len(ips), path)
+	case clipErr == nil && fileErr != nil:
+		return fmt.Sprintf("copied %d working endpoints; save failed: %v", len(ips), fileErr)
+	default:
+		return fmt.Sprintf("copy failed: %v; save failed: %v", clipErr, fileErr)
+	}
+}
+
+func writeIPsBesideExecutable(ips []string) (string, error) {
+	exe, err := os.Executable()
+	dir := ""
+	if err == nil {
+		dir = filepath.Dir(exe)
+	}
+	if dir == "" {
+		dir, err = os.Getwd()
+		if err != nil {
+			dir = "."
+		}
+	}
+	path := filepath.Join(dir, "ips.txt")
+	if err := writeIPsFile(path, ips); err == nil {
+		return path, nil
+	}
+
+	wd, wdErr := os.Getwd()
+	if wdErr != nil {
+		return path, wdErr
+	}
+	fallback := filepath.Join(wd, "ips.txt")
+	if fallback == path {
+		err := writeIPsFile(fallback, ips)
+		return fallback, err
+	}
+	err = writeIPsFile(fallback, ips)
+	return fallback, err
+}
+
+func writeIPsFile(path string, ips []string) error {
+	text := strings.Join(ips, "\n")
+	if text != "" {
+		text += "\n"
+	}
+	return os.WriteFile(path, []byte(text), 0644)
 }
 
 func (m AppModel) handleColosKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1550,6 +1632,79 @@ func minInt(a, b int) int {
 	return b
 }
 
+func scanPulse(frame int) string {
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	return frames[frame%len(frames)]
+}
+
+func scanWave(frame, width int) string {
+	if width < 8 {
+		width = 8
+	}
+	pos := frame % width
+	var sb strings.Builder
+	for i := 0; i < width; i++ {
+		switch {
+		case i == pos:
+			sb.WriteString(styleAccent.Render("●"))
+		case (i+1)%4 == 0:
+			sb.WriteString(styleDim.Render("·"))
+		default:
+			sb.WriteString(styleDim.Render("─"))
+		}
+	}
+	return sb.String()
+}
+
+func formatPorts(ports []int) string {
+	if len(ports) == 0 {
+		return "config"
+	}
+	parts := make([]string, len(ports))
+	for i, port := range ports {
+		parts[i] = strconv.Itoa(port)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (m AppModel) selectedPortSet() map[int]bool {
+	if len(m.configSelectedPorts) == 0 {
+		return map[int]bool{0: true}
+	}
+	out := make(map[int]bool, len(m.configSelectedPorts))
+	for port, on := range m.configSelectedPorts {
+		if on {
+			out[port] = true
+		}
+	}
+	if len(out) == 0 {
+		out[0] = true
+	}
+	return out
+}
+
+func (m *AppModel) toggleFocusedConfigPort() {
+	if m.configPortFocus < 0 || m.configPortFocus >= len(configPortChoices) {
+		return
+	}
+	port := configPortChoices[m.configPortFocus].port
+	if m.configSelectedPorts == nil {
+		m.configSelectedPorts = map[int]bool{0: true}
+	}
+	if port == 0 {
+		m.configSelectedPorts = map[int]bool{0: true}
+		return
+	}
+	delete(m.configSelectedPorts, 0)
+	m.configSelectedPorts[port] = !m.configSelectedPorts[port]
+	if !m.configSelectedPorts[port] {
+		delete(m.configSelectedPorts, port)
+	}
+	if len(m.configSelectedPorts) == 0 {
+		m.configSelectedPorts[0] = true
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Scan with Config page
 // ---------------------------------------------------------------------------
@@ -1557,7 +1712,7 @@ func minInt(a, b int) int {
 func (m AppModel) viewScanWithConfig() string {
 	var sb strings.Builder
 
-	sb.WriteString(styleTitle.Render("\n  ⚡  Scan with Config\n"))
+	sb.WriteString(styleTitle.Render("\n  ⚡  Find Working IPs\n"))
 	sb.WriteString(fmt.Sprintf("%s\n\n", styleSep.Render("  "+strings.Repeat("─", minInt(m.width-4, 70)))))
 
 	if !m.configScanning && !m.configDone {
@@ -1582,64 +1737,91 @@ func (m AppModel) viewScanWithConfig() string {
 				sb.WriteString(styleDim.Render(text))
 			}
 		}
+		renderMultiPorts := func() {
+			enabled := m.selectedPortSet()
+			for i, choice := range configPortChoices {
+				label := choice.label
+				if enabled[choice.port] {
+					label = "✓ " + label
+				} else {
+					label = "  " + label
+				}
+				if i == m.configPortFocus && m.configSetupRow == 5 {
+					sb.WriteString(styleSelected.Render(" " + label + " "))
+				} else if enabled[choice.port] {
+					sb.WriteString(styleGood.Render(" " + label + " "))
+				} else {
+					sb.WriteString(styleNormal.Render(" " + label + " "))
+				}
+				if i < len(configPortChoices)-1 {
+					sb.WriteString(styleDim.Render("│"))
+				}
+			}
+		}
 
 		// Row 0: VLESS URL
 		rowLabel(0, "  Config ")
 		sb.WriteString(" " + m.configInput.View() + "\n")
 		sb.WriteString(styleDim.Render("            ←/→ move cursor   ctrl+a home   ctrl+e end") + "\n\n")
 
-		// Row 1: Count
-		rowLabel(1, "  Count  ")
+		// Row 1: Source
+		rowLabel(1, "  Source ")
+		sb.WriteString(" ")
+		renderPills(configIPModeLabels, m.configIPMode)
+		sb.WriteString("\n")
+		if m.configIPMode == 0 {
+			sb.WriteString(styleDim.Render("            random Cloudflare IPv4 IPs") + "\n\n")
+		} else {
+			sb.WriteString(styleDim.Render("            read custom IPs from ips.txt next to the app or working directory") + "\n\n")
+		}
+
+		// Row 2: Count
+		rowLabel(2, "  Count  ")
 		sb.WriteString(" ")
 		renderPills(configCountLabels, m.configCountIdx)
 		sb.WriteString("\n")
-		if m.configCustomMode && m.configCustomRow == 1 {
+		if m.configCustomMode && m.configCustomRow == 2 {
 			sb.WriteString(styleAccent.Render("            custom count: ") + m.configCustomInput.View() + "\n\n")
 		} else if configCountValues[m.configCountIdx] == 0 && m.configCountCustom != "" {
 			sb.WriteString(styleDim.Render(fmt.Sprintf("            IPs to probe in Phase 1  (custom: %s)", m.configCountCustom)) + "\n\n")
+		} else if m.configIPMode == 1 {
+			sb.WriteString(styleDim.Render("            ignored when Source is From File — all IPs in ips.txt are used") + "\n\n")
 		} else {
 			sb.WriteString(styleDim.Render("            IPs to probe in Phase 1") + "\n\n")
 		}
 
-		// Row 2: Workers
-		rowLabel(2, "  Workers")
+		// Row 3: Workers
+		rowLabel(3, "  Workers")
 		sb.WriteString(" ")
 		renderPills(quickWorkersLabels(), m.configWorkersIdx)
 		sb.WriteString("\n")
-		if m.configCustomMode && m.configCustomRow == 2 {
+		if m.configCustomMode && m.configCustomRow == 3 {
 			sb.WriteString(styleAccent.Render("            custom workers: ") + m.configCustomInput.View() + "\n\n")
 		} else if quickWorkersPresets[m.configWorkersIdx].value == "" && m.configWorkersCustom != "" {
-			sb.WriteString(styleDim.Render(fmt.Sprintf("            concurrent probers  (custom: %s)", m.configWorkersCustom)) + "\n\n")
+			sb.WriteString(styleDim.Render(fmt.Sprintf("            concurrent probes  (custom: %s)", m.configWorkersCustom)) + "\n\n")
 		} else {
-			sb.WriteString(styleDim.Render("            concurrent probers") + "\n\n")
+			sb.WriteString(styleDim.Render("            concurrent probes") + "\n\n")
 		}
 
-		// Row 3: Timeout
-		rowLabel(3, "  Timeout")
+		// Row 4: Timeout
+		rowLabel(4, "  Timeout")
 		sb.WriteString(" ")
 		renderPills(quickTimeoutLabels(), m.configTimeoutIdx)
 		sb.WriteString("\n")
-		if m.configCustomMode && m.configCustomRow == 3 {
+		if m.configCustomMode && m.configCustomRow == 4 {
 			sb.WriteString(styleAccent.Render("            custom timeout: ") + m.configCustomInput.View() + "\n\n")
 		} else if quickTimeoutPresets[m.configTimeoutIdx].value == "" && m.configTimeoutCustom != "" {
-			sb.WriteString(styleDim.Render(fmt.Sprintf("            per-IP probe timeout  (custom: %s)", m.configTimeoutCustom)) + "\n\n")
+			sb.WriteString(styleDim.Render(fmt.Sprintf("            per-probe deadline  (custom: %s)", m.configTimeoutCustom)) + "\n\n")
 		} else {
-			sb.WriteString(styleDim.Render("            per-IP probe timeout") + "\n\n")
+			sb.WriteString(styleDim.Render("            per-probe deadline") + "\n\n")
 		}
 
-		// Row 4: IP Mode
-		rowLabel(4, "  Source ")
+		// Row 5: Ports
+		rowLabel(5, "  Ports  ")
 		sb.WriteString(" ")
-		renderPills(configIPModeLabels, m.configIPMode)
+		renderMultiPorts()
 		sb.WriteString("\n")
-		sb.WriteString(styleDim.Render("            IPs to test in Phase 1") + "\n\n")
-
-		// Row 5: Top N (best IPs to pass to Phase 2)
-		rowLabel(5, "  Top N  ")
-		sb.WriteString(" ")
-		renderPills(configTopNLabels, m.configTopNIdx)
-		sb.WriteString("\n")
-		sb.WriteString(styleDim.Render("            best IPs to validate with xray") + "\n\n")
+		sb.WriteString(styleDim.Render("            space toggles a port; selecting multiple ports multiplies work") + "\n\n")
 
 		hint := "  ↑/↓ row   ←/→ option   enter start   esc back"
 		if m.configSetupRow == 0 {
@@ -1655,12 +1837,12 @@ func (m AppModel) viewScanWithConfig() string {
 		return sb.String()
 	}
 
-	// Stats row — if Phase 1 found no healthy IPs, show a clear message instead
+	// Stats row — if Phase 1 found no candidates, show a clear message instead
 	// of a fake "0/10" counter.
 	if m.configTotal == 0 && m.configDone {
 		sb.WriteString(fmt.Sprintf("  %s  %s\n\n",
 			styleGood.Render("✓"),
-			styleBad.Render("No healthy IPs found — nothing to validate with xray"),
+			styleBad.Render("No working candidates found"),
 		))
 		sb.WriteString(styleHint.Render("  esc back") + "\n")
 		return sb.String()
@@ -1687,18 +1869,24 @@ func (m AppModel) viewScanWithConfig() string {
 		styleDim.Render(strings.Repeat("░", bw-filled)) + "]" +
 		fmt.Sprintf(" %.0f%%", pct)
 
-	sb.WriteString(fmt.Sprintf("  %s  tested: %s  healthy: %s  failed: %s  %s\n\n",
+	sb.WriteString(fmt.Sprintf("  %s  tested: %s  working: %s  failed: %s  %s\n\n",
 		icon,
 		styleAccent.Render(fmt.Sprintf("%d/%d", done, total)),
 		styleGood.Render(fmt.Sprintf("%d", success)),
 		styleBad.Render(fmt.Sprintf("%d", failed)),
 		progBar,
 	))
+	if !m.configDone {
+		sb.WriteString(fmt.Sprintf("  %s  xray validating candidates  %s\n\n",
+			styleAccent.Render(scanPulse(m.bannerFrame)),
+			scanWave(m.bannerFrame+5, 32),
+		))
+	}
 
 	// Table header
-	hdr := fmt.Sprintf("  %-16s  %-8s  %8s  %8s  %6s",
-		"IP", "TYPE", "SPEED", "LATENCY", "STATUS")
-	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 56))))
+	hdr := fmt.Sprintf("  %-22s  %-8s  %8s  %8s  %6s",
+		"ENDPOINT", "TYPE", "SPEED", "LATENCY", "STATUS")
+	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 64))))
 
 	// Results
 	maxRows := m.height - 12
@@ -1707,29 +1895,32 @@ func (m AppModel) viewScanWithConfig() string {
 	}
 	rows := m.configResults
 	if len(rows) > maxRows {
-		rows = rows[:maxRows]
+		rows = rows[len(rows)-maxRows:]
 	}
 
-	for _, r := range rows {
+	for i := len(rows) - 1; i >= 0; i-- {
+		r := rows[i]
 		if r.Success {
-			mbps := r.Throughput * 8 / 1000000
-			line := fmt.Sprintf("  %-16s  %-8s  %5.1f Mbps  %5dms  %6s",
-				r.IP, r.Transport, mbps, r.Latency.Milliseconds(), "✓")
+			line := fmt.Sprintf("  %-22s  %-8s  %8s  %8s  %6s",
+				formatEndpoint(r.IP, r.Port), r.Transport, formatValidationSpeed(r.Throughput), formatValidationLatency(r.Latency), "✓")
 			sb.WriteString(styleGood.Render(line) + "\n")
 		} else {
 			errMsg := r.Error
 			if len(errMsg) > 20 {
 				errMsg = errMsg[:20] + "…"
 			}
-			line := fmt.Sprintf("  %-16s  %-8s  %9s  %8s  %6s",
-				r.IP, r.Transport, "—", "—", "✗")
+			line := fmt.Sprintf("  %-22s  %-8s  %9s  %8s  %6s",
+				formatEndpoint(r.IP, r.Port), r.Transport, "—", "—", "✗")
 			sb.WriteString(styleBad.Render(line) + "\n")
 		}
 	}
 
 	sb.WriteRune('\n')
+	if m.statusMsg != "" {
+		sb.WriteString(styleGood.Render("  "+m.statusMsg) + "\n")
+	}
 	if m.configDone {
-		sb.WriteString(styleHint.Render("  q/esc back to menu") + "\n")
+		sb.WriteString(styleHint.Render("  c copy working endpoints   q/esc back to menu") + "\n")
 	}
 
 	return sb.String()
@@ -1762,11 +1953,11 @@ func (m AppModel) handleScanWithConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			val := strings.TrimSpace(m.configCustomInput.Value())
 			switch m.configCustomRow {
-			case 1:
-				m.configCountCustom = val
 			case 2:
-				m.configWorkersCustom = val
+				m.configCountCustom = val
 			case 3:
+				m.configWorkersCustom = val
+			case 4:
 				m.configTimeoutCustom = val
 			}
 			m.configCustomMode = false
@@ -1799,6 +1990,11 @@ func (m AppModel) handleScanWithConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.configDone = false
 			return m, nil
 		}
+	case "c":
+		if m.configDone {
+			m.statusMsg = m.copyWorkingIPs()
+			return m, nil
+		}
 	}
 
 	if m.configScanning || m.configDone {
@@ -1807,55 +2003,55 @@ func (m AppModel) handleScanWithConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// --- Setup navigation ---
 	// Arrow keys always navigate rows/presets (or move cursor on row 0 for left/right).
-	// Vim letter shortcuts (h/j/k/l) only navigate on rows 1-5; on row 0 they are
+	// Vim letter shortcuts (h/j/k/l) only navigate on picker rows; on row 0 they are
 	// forwarded to the URL text input so the user can type them freely.
 	const maxRow = 5
 
 	configNavLeft := func() {
 		switch m.configSetupRow {
 		case 1:
-			if m.configCountIdx > 0 {
-				m.configCountIdx--
-			}
-		case 2:
-			if m.configWorkersIdx > 0 {
-				m.configWorkersIdx--
-			}
-		case 3:
-			if m.configTimeoutIdx > 0 {
-				m.configTimeoutIdx--
-			}
-		case 4:
 			if m.configIPMode > 0 {
 				m.configIPMode--
 			}
+		case 2:
+			if m.configCountIdx > 0 {
+				m.configCountIdx--
+			}
+		case 3:
+			if m.configWorkersIdx > 0 {
+				m.configWorkersIdx--
+			}
+		case 4:
+			if m.configTimeoutIdx > 0 {
+				m.configTimeoutIdx--
+			}
 		case 5:
-			if m.configTopNIdx > 0 {
-				m.configTopNIdx--
+			if m.configPortFocus > 0 {
+				m.configPortFocus--
 			}
 		}
 	}
 	configNavRight := func() {
 		switch m.configSetupRow {
 		case 1:
-			if m.configCountIdx < len(configCountValues)-1 {
-				m.configCountIdx++
-			}
-		case 2:
-			if m.configWorkersIdx < len(quickWorkersPresets)-1 {
-				m.configWorkersIdx++
-			}
-		case 3:
-			if m.configTimeoutIdx < len(quickTimeoutPresets)-1 {
-				m.configTimeoutIdx++
-			}
-		case 4:
 			if m.configIPMode < len(configIPModeLabels)-1 {
 				m.configIPMode++
 			}
+		case 2:
+			if m.configCountIdx < len(configCountValues)-1 {
+				m.configCountIdx++
+			}
+		case 3:
+			if m.configWorkersIdx < len(quickWorkersPresets)-1 {
+				m.configWorkersIdx++
+			}
+		case 4:
+			if m.configTimeoutIdx < len(quickTimeoutPresets)-1 {
+				m.configTimeoutIdx++
+			}
 		case 5:
-			if m.configTopNIdx < len(configTopNValues)-1 {
-				m.configTopNIdx++
+			if m.configPortFocus < len(configPortChoices)-1 {
+				m.configPortFocus++
 			}
 		}
 	}
@@ -1936,6 +2132,11 @@ func (m AppModel) handleScanWithConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// row 0: forward 'l' to URL input below
 
+	case " ":
+		if m.configSetupRow == 5 {
+			m.toggleFocusedConfigPort()
+			return m, nil
+		}
 	case "enter":
 		// Row 0 (URL): Enter moves focus to the next row so the user can
 		// adjust settings before starting — it does NOT launch the scan.
@@ -1945,38 +2146,36 @@ func (m AppModel) handleScanWithConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Activate custom input when "Custom" preset is selected.
-		switch m.configSetupRow {
-		case 1:
-			if configCountValues[m.configCountIdx] == 0 {
-				m.configCustomMode = true
-				m.configCustomRow = 1
-				m.configCustomInput.SetValue(m.configCountCustom)
-				m.configCustomInput.Placeholder = "e.g. 50000"
-				m.configCustomInput.Focus()
-				return m, textinput.Blink
-			}
-		case 2:
-			if quickWorkersPresets[m.configWorkersIdx].value == "" {
-				m.configCustomMode = true
-				m.configCustomRow = 2
-				m.configCustomInput.SetValue(m.configWorkersCustom)
-				m.configCustomInput.Placeholder = "e.g. 150"
-				m.configCustomInput.Focus()
-				return m, textinput.Blink
-			}
-		case 3:
-			if quickTimeoutPresets[m.configTimeoutIdx].value == "" {
-				m.configCustomMode = true
-				m.configCustomRow = 3
-				m.configCustomInput.SetValue(m.configTimeoutCustom)
-				m.configCustomInput.Placeholder = "e.g. 7s"
-				m.configCustomInput.Focus()
-				return m, textinput.Blink
-			}
+		if m.configSetupRow == 5 {
+			m.toggleFocusedConfigPort()
+			return m, nil
+		}
+		if m.configSetupRow == 2 && configCountValues[m.configCountIdx] == 0 {
+			m.configCustomMode = true
+			m.configCustomRow = 2
+			m.configCustomInput.SetValue(m.configCountCustom)
+			m.configCustomInput.Placeholder = "e.g. 50000"
+			m.configCustomInput.Focus()
+			return m, textinput.Blink
+		}
+		if m.configSetupRow == 3 && quickWorkersPresets[m.configWorkersIdx].value == "" {
+			m.configCustomMode = true
+			m.configCustomRow = 3
+			m.configCustomInput.SetValue(m.configWorkersCustom)
+			m.configCustomInput.Placeholder = "e.g. 150"
+			m.configCustomInput.Focus()
+			return m, textinput.Blink
+		}
+		if m.configSetupRow == 4 && quickTimeoutPresets[m.configTimeoutIdx].value == "" {
+			m.configCustomMode = true
+			m.configCustomRow = 4
+			m.configCustomInput.SetValue(m.configTimeoutCustom)
+			m.configCustomInput.Placeholder = "e.g. 7s"
+			m.configCustomInput.Focus()
+			return m, textinput.Blink
 		}
 
-		// Launch the scan from rows 1-5.
+		// Launch the scan from the count row.
 		rawURL := strings.TrimSpace(m.configInput.Value())
 		if rawURL == "" {
 			m.statusMsg = "paste your VLESS URL in the Config field above"
@@ -1997,20 +2196,14 @@ func (m AppModel) handleScanWithConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.configPhase1Results = nil
 		m.configPhase1Done = false
 		m.configPhase1Stats = StatsMsg{}
-		// Store Phase 1 target count for progress display.
-		// For from-file mode we don't know the count until the file is read.
-		if m.configIPMode == 1 {
-			m.configPhase1Total = 0
-		} else {
-			count := configCountValues[m.configCountIdx]
-			if count == 0 {
-				count, _ = strconv.Atoi(m.configCountCustom)
-				if count <= 0 {
-					count = 1000
-				}
+		count := configCountValues[m.configCountIdx]
+		if count == 0 {
+			count, _ = strconv.Atoi(m.configCountCustom)
+			if count <= 0 {
+				count = 1000
 			}
-			m.configPhase1Total = count
 		}
+		m.configPhase1Total = m.phase1TargetTotal(count)
 		return m, m.startConfigPhase1()
 	}
 
@@ -2090,7 +2283,27 @@ var configCountValues = []int{1000, 5000, 20000, 0} // 0 = custom
 var configCountLabels = []string{"1,000", "5,000", "20,000", "Custom"}
 var configTopNValues = []int{10, 25, 50, 0}
 var configTopNLabels = []string{"10", "25", "50", "All"}
-var configIPModeLabels = []string{"Random IPs", "From File (ips.txt)"}
+var configIPModeLabels = []string{"Random", "From File"}
+var configPortChoices = []struct {
+	label string
+	port  int
+}{
+	{"Config", 0},
+	{"443", 443},
+	{"8443", 8443},
+	{"2053", 2053},
+	{"2083", 2083},
+	{"2087", 2087},
+	{"2096", 2096},
+}
+
+func configPortLabels() []string {
+	labels := make([]string, len(configPortChoices))
+	for i, p := range configPortChoices {
+		labels[i] = p.label
+	}
+	return labels
+}
 
 // quickWorkersLabels and quickTimeoutLabels return the display labels for the
 // shared quick-scan preset slices so viewScanWithConfig can use them.
@@ -2244,23 +2457,27 @@ func (m AppModel) viewConfigPhase1() string {
 	}
 
 	targetStr := fmt.Sprintf("%d", m.configPhase1Total)
-	if m.configIPMode == 1 && m.configPhase1Total == 0 {
-		targetStr = "file"
-	}
-	sb.WriteString(fmt.Sprintf("  %s  tested: %s  healthy: %s  target: %s\n\n",
+	sb.WriteString(fmt.Sprintf("  %s  tested: %s  candidates: %s  target: %s\n\n",
 		icon,
 		styleAccent.Render(fmt.Sprintf("%d", len(m.configPhase1Results))),
 		styleGood.Render(fmt.Sprintf("%d", healthy)),
 		styleDim.Render(targetStr),
 	))
+	if !m.configPhase1Done {
+		sb.WriteString(fmt.Sprintf("  %s  %s  ports: %s\n\n",
+			styleAccent.Render(scanPulse(m.bannerFrame)),
+			scanWave(m.bannerFrame, 28),
+			styleDim.Render(formatPorts(m.resolveConfigPorts())),
+		))
+	}
 
 	if m.configPhase1Done {
 		topN := configTopNValues[m.configTopNIdx]
-		sb.WriteString(styleGood.Render(fmt.Sprintf("  Found %d healthy IPs. Starting Phase 2 with top %d...\n", healthy, topN)))
+		sb.WriteString(styleGood.Render(fmt.Sprintf("  Found %d candidates. Testing top %d with xray...\n", healthy, topN)))
 	} else if m.configIPMode == 1 {
-		sb.WriteString(styleNormal.Render("  Testing IPs from ips.txt for connectivity...\n"))
+		sb.WriteString(styleNormal.Render("  Probing IPs from ips.txt on the selected ports...\n"))
 	} else {
-		sb.WriteString(styleNormal.Render("  Scanning Cloudflare IP ranges for connectivity...\n"))
+		sb.WriteString(styleNormal.Render("  Scanning random Cloudflare IPv4 IPs with your config settings...\n"))
 	}
 
 	sb.WriteString("\n" + styleHint.Render("  q/esc cancel") + "\n")
@@ -2284,7 +2501,9 @@ type configPhase1Options struct {
 	count       int
 	concurrency int
 	timeout     time.Duration
-	fromFile    bool // true → read IPs from ips.txt instead of Cloudflare ranges
+	rawURL      string
+	ports       []int
+	fromFile    bool
 }
 
 func (m AppModel) startConfigPhase1() tea.Cmd {
@@ -2307,7 +2526,6 @@ func (m AppModel) resolvePhase1Options() configPhase1Options {
 		}
 	}
 
-	// Workers
 	concurrency := 0
 	if m.configWorkersIdx < len(quickWorkersPresets) {
 		wp := quickWorkersPresets[m.configWorkersIdx]
@@ -2321,7 +2539,6 @@ func (m AppModel) resolvePhase1Options() configPhase1Options {
 		concurrency = 50
 	}
 
-	// Timeout
 	var timeout time.Duration
 	if m.configTimeoutIdx < len(quickTimeoutPresets) {
 		tp := quickTimeoutPresets[m.configTimeoutIdx]
@@ -2339,8 +2556,42 @@ func (m AppModel) resolvePhase1Options() configPhase1Options {
 		count:       count,
 		concurrency: concurrency,
 		timeout:     timeout,
+		rawURL:      m.configURL,
+		ports:       m.resolveConfigPorts(),
 		fromFile:    m.configIPMode == 1,
 	}
+}
+
+func (m AppModel) phase1TargetTotal(count int) int {
+	ports := len(m.resolveConfigPorts())
+	if ports <= 0 {
+		ports = 1
+	}
+	if m.configIPMode == 1 {
+		if ips, err := loadDefaultIPsFile(); err == nil {
+			return len(ips) * ports
+		}
+		return 0
+	}
+	return count * ports
+}
+
+func (m AppModel) resolveConfigPorts() []int {
+	selected := m.selectedPortSet()
+	var ports []int
+	for _, choice := range configPortChoices {
+		if choice.port > 0 && selected[choice.port] {
+			ports = append(ports, choice.port)
+		}
+	}
+	if len(ports) > 0 {
+		return ports
+	}
+	cfg, err := xraytest.ParseProxyURL(m.configURL)
+	if err != nil || cfg.Port <= 0 {
+		return []int{443}
+	}
+	return []int{cfg.Port}
 }
 
 // runConfigPhase1 is defined in cmds.go and accepts a configPhase1Options struct.
@@ -2371,7 +2622,7 @@ func runConfigPhase2(rawURL string, topIPs []*result.Result) {
 
 	for i, r := range topIPs {
 		ip := r.IP.String()
-		swapped := cfg.WithAddress(ip)
+		swapped := cfg.WithEndpoint(ip, r.Port)
 		vr := xraytest.ValidateConfig(ctx, swapped, 20*time.Second)
 		if prog != nil {
 			prog.Send(ConfigProgressMsg{

@@ -68,8 +68,10 @@ func TestBuildXrayConfig_WS(t *testing.T) {
 	if wsSettings["path"].(string) != "/download" {
 		t.Errorf("path: got %v, want /download", wsSettings["path"])
 	}
-	if wsSettings["host"].(string) != "example.com" {
-		t.Errorf("host: got %v, want example.com", wsSettings["host"])
+	// Host is now in headers map (xray-core format) instead of a top-level "host" field.
+	headers := wsSettings["headers"].(map[string]interface{})
+	if headers["Host"].(string) != "example.com" {
+		t.Errorf("headers.Host: got %v, want example.com", headers["Host"])
 	}
 }
 

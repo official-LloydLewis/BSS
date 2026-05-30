@@ -15,6 +15,7 @@ type Result struct {
 	Latencies   []time.Duration // per-try latencies; 0 = failed try
 	TLSOk       bool
 	WSOk        bool // WebSocket connection survived hold test
+	RequireWS   bool // true when WebSocket success is part of health criteria
 	HTTPStatus  int
 	Colo        string
 	Throughput  float64 // bytes/sec, 0 if not measured
@@ -106,14 +107,17 @@ func (r *Result) IsHealthy() bool {
 
 	switch r.ProbeMode {
 	case "http":
-		// TLS is only expected on port 443; plain HTTP (port 80) has no TLS.
-		if r.Port == 443 && !r.TLSOk {
+		// Plain HTTP (port 80) has no TLS; every other HTTP-mode port is HTTPS.
+		if r.Port != 80 && !r.TLSOk {
 			return false
 		}
 		if r.HTTPStatus < 200 || r.HTTPStatus >= 400 || r.Colo == "" {
 			return false
 		}
 		if r.SpeedTested && r.Throughput <= 0 {
+			return false
+		}
+		if r.RequireWS && !r.WSOk {
 			return false
 		}
 		return true

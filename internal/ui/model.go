@@ -115,6 +115,7 @@ type ScanConfig struct {
 	SNI         string
 	UseV4       bool
 	UseV6       bool
+	Staged      bool
 }
 
 func defaultScanConfig() ScanConfig {
@@ -127,6 +128,7 @@ func defaultScanConfig() ScanConfig {
 		Mode:        config.ScanDefaults.Mode,
 		UseV4:       config.ScanDefaults.UseV4,
 		UseV6:       config.ScanDefaults.UseV6,
+		Staged:      false,
 	}
 }
 
@@ -334,6 +336,7 @@ func (m *AppModel) buildFormInputs() {
 		{"output file (.csv/.json/.txt, empty = none)", m.scanCfg.OutputFile},
 		{"colo filter (e.g. FRA,AMS, empty = all)", m.scanCfg.ColoFilter},
 		{"SNI override (empty = auto-rotate)", m.scanCfg.SNI},
+		{"staged scan (true/false, optional)", strconv.FormatBool(m.scanCfg.Staged)},
 	}
 
 	inputs := make([]textinput.Model, len(fields))
@@ -834,7 +837,7 @@ func (m AppModel) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) saveScanConfig() {
-	if len(m.formInputs) >= 9 {
+	if len(m.formInputs) >= 10 {
 		m.scanCfg.Count = m.formInputs[0].Value()
 		m.scanCfg.Concurrency = m.formInputs[1].Value()
 		m.scanCfg.Timeout = m.formInputs[2].Value()
@@ -844,6 +847,7 @@ func (m *AppModel) saveScanConfig() {
 		m.scanCfg.OutputFile = m.formInputs[6].Value()
 		m.scanCfg.ColoFilter = m.formInputs[7].Value()
 		m.scanCfg.SNI = m.formInputs[8].Value()
+		m.scanCfg.Staged = parseBool(m.formInputs[9].Value())
 		m.scanCfg.Mode = modes[m.modeIdx]
 	}
 }
@@ -860,7 +864,7 @@ func (m AppModel) handleLiveScanKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, CancelScanCmd()
 		}
 	case "s":
-		m.sortIdx = (m.sortIdx + 1) % 5
+		m.sortIdx = (m.sortIdx + 1) % 6
 		m.sortBy = result.SortBy(m.sortIdx)
 		result.Sort(m.scanResults, m.sortBy)
 	case "enter":
@@ -880,7 +884,7 @@ func (m AppModel) handleResultsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "esc", "enter":
 		m.page = PageHome
 	case "s":
-		m.sortIdx = (m.sortIdx + 1) % 5
+		m.sortIdx = (m.sortIdx + 1) % 6
 		m.sortBy = result.SortBy(m.sortIdx)
 		result.Sort(m.scanResults, m.sortBy)
 	case "c":
@@ -894,7 +898,7 @@ var clipboardWriteAll = clipboard.WriteAll
 // copyHealthyIPsToClipboard writes one IP per line to the system clipboard
 // and returns a short status message to display to the user.
 func (m AppModel) copyHealthyIPsToClipboard() string {
-	top := result.TopN(m.scanResults, 0) // all healthy IPs, sorted by avg
+	top := result.TopN(m.scanResults, 0) // all healthy IPs, sorted by clean score
 	if len(top) == 0 {
 		return "no healthy IPs to copy"
 	}
@@ -1341,8 +1345,8 @@ func (m AppModel) viewLiveScan() string {
 	))
 
 	// Table header
-	hdr := fmt.Sprintf("  %-18s  %7s  %9s  %8s  %9s  %5s  %-6s",
-		"IP", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
+	hdr := fmt.Sprintf("  %-18s  %6s  %7s  %8s  %8s  %5s  %-6s",
+		"IP", "SCORE", "LOSS", "AVG(ms)", "JTR(ms)", "TLS", "COLO")
 	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 72))))
 
 	maxRows := m.height - 14
@@ -1363,11 +1367,10 @@ func (m AppModel) viewLiveScan() string {
 		if colo == "" {
 			colo = "—"
 		}
-		line := fmt.Sprintf("  %-18s  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
-			r.IP.String(), r.Loss(),
+		line := fmt.Sprintf("  %-18s  %6.1f  %6.1f%%  %8.2f  %8.2f  %5s  %-6s",
+			r.IP.String(), r.CleanScore, r.Loss(),
 			float64(r.Avg().Milliseconds()),
 			float64(r.Jitter().Milliseconds()),
-			r.Throughput/1024,
 			tlsIcon, colo)
 
 		switch {
@@ -1381,10 +1384,10 @@ func (m AppModel) viewLiveScan() string {
 	}
 
 	sb.WriteRune('\n')
-	sortNames := []string{"avg", "loss", "jitter", "colo", "speed"}
-	hint := fmt.Sprintf("  s sort(→%s)   c copy IPs   q/esc back", sortNames[m.sortIdx%5])
+	sortNames := []string{"avg", "loss", "jitter", "colo", "speed", "clean"}
+	hint := fmt.Sprintf("  s sort(→%s)   c copy IPs   q/esc back", sortNames[m.sortIdx%6])
 	if m.scanDone {
-		hint = fmt.Sprintf("  s sort(→%s)   c copy IPs   enter/q → results", sortNames[m.sortIdx%5])
+		hint = fmt.Sprintf("  s sort(→%s)   c copy IPs   enter/q → results", sortNames[m.sortIdx%6])
 	}
 	if m.statusMsg != "" {
 		sb.WriteString(styleGood.Render("  "+m.statusMsg) + "\n")
@@ -1407,8 +1410,8 @@ func (m AppModel) viewResults() string {
 	if len(top) == 0 {
 		sb.WriteString(styleWarn.Render("  No healthy IPs found. Try raising timeout, lowering workers, or using a different SNI.\n"))
 	} else {
-		hdr := fmt.Sprintf("  %-18s  %7s  %9s  %8s  %9s  %5s  %-6s",
-			"IP", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
+		hdr := fmt.Sprintf("  %-18s  %6s  %7s  %9s  %8s  %5s  %-6s",
+			"IP", "SCORE", "LOSS", "AVG(ms)", "JTR(ms)", "TLS", "COLO")
 		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 72))))
 
 		for i, r := range top {
@@ -1421,11 +1424,10 @@ func (m AppModel) viewResults() string {
 				colo = "—"
 			}
 			rank := styleAccent.Render(fmt.Sprintf(" %2d. ", i+1))
-			line := fmt.Sprintf("%-18s  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
-				r.IP.String(), r.Loss(),
+			line := fmt.Sprintf("%-18s  %6.1f  %6.1f%%  %9.2f  %8.2f  %5s  %-6s",
+				r.IP.String(), r.CleanScore, r.Loss(),
 				float64(r.Avg().Milliseconds()),
 				float64(r.Jitter().Milliseconds()),
-				r.Throughput/1024,
 				tlsIcon, colo)
 			sb.WriteString(fmt.Sprintf("%s%s\n", rank, styleGood.Render(line)))
 		}
@@ -1508,13 +1510,13 @@ func (m AppModel) viewAbout() string {
 func PrintTable(results []*result.Result, top int) {
 	sorted := make([]*result.Result, len(results))
 	copy(sorted, results)
-	result.Sort(sorted, result.SortByAvg)
+	result.Sort(sorted, result.SortByCleanScore)
 	if top > 0 && top < len(sorted) {
 		sorted = sorted[:top]
 	}
 
-	hdr := fmt.Sprintf("  %-18s  %7s  %9s  %8s  %9s  %4s  %-5s",
-		"IP", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
+	hdr := fmt.Sprintf("  %-18s  %6s  %7s  %9s  %8s  %4s  %-5s",
+		"IP", "SCORE", "LOSS", "AVG(ms)", "JTR(ms)", "TLS", "COLO")
 	fmt.Println(hdr)
 	fmt.Println("  " + strings.Repeat("─", 72))
 	for _, r := range sorted {
@@ -1526,11 +1528,10 @@ func PrintTable(results []*result.Result, top int) {
 		if colo == "" {
 			colo = "—"
 		}
-		fmt.Printf("  %-18s  %6.1f%%  %9.2f  %8.2f  %9.1f  %4s  %-5s\n",
-			r.IP.String(), r.Loss(),
+		fmt.Printf("  %-18s  %6.1f  %6.1f%%  %9.2f  %8.2f  %4s  %-5s\n",
+			r.IP.String(), r.CleanScore, r.Loss(),
 			float64(r.Avg().Milliseconds()),
 			float64(r.Jitter().Milliseconds()),
-			r.Throughput/1024,
 			tls, colo)
 	}
 	fmt.Println()

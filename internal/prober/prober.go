@@ -30,11 +30,6 @@ type Config struct {
 	Mode               Mode
 	Tries              int
 	Timeout            time.Duration
-	TCPTimeout         time.Duration
-	TLSTimeout         time.Duration
-	HTTPTimeout        time.Duration
-	DownloadTimeout    time.Duration
-	WebSocketTimeout   time.Duration
 	SNI                string // empty = rotate automatically
 	SpeedBytes         int64  // optional HTTP download sample size; 0 disables it
 	InsecureSkipVerify bool   // skip TLS cert verification (use for Phase 1 where Phase 2 validates properly)
@@ -116,12 +111,12 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 
 		switch cfg.Mode {
 		case ModeTCP:
-			lat = probeTCP(ctx, ip, cfg.Port, cfg.timeoutFor(cfg.TCPTimeout))
+			lat = probeTCP(ctx, ip, cfg.Port, cfg.Timeout)
 		case ModeTLS:
-			lat, tlsOk = probeTLS(ctx, ip, cfg.Port, sni, cfg.timeoutFor(cfg.TLSTimeout), cfg.InsecureSkipVerify)
+			lat, tlsOk = probeTLS(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.InsecureSkipVerify)
 		case ModeHTTP:
 			var wsOk bool
-			lat, tlsOk, httpStatus, colo, throughput, wsOk = probeHTTP(ctx, ip, cfg.Port, sni, cfg.timeoutFor(cfg.HTTPTimeout), cfg.timeoutFor(cfg.DownloadTimeout), cfg.timeoutFor(cfg.WebSocketTimeout), cfg.SpeedBytes, cfg.InsecureSkipVerify, cfg.WebSocketHost, cfg.WebSocketPath, cfg.RequireWebSocket)
+			lat, tlsOk, httpStatus, colo, throughput, wsOk = probeHTTP(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.SpeedBytes, cfg.InsecureSkipVerify, cfg.WebSocketHost, cfg.WebSocketPath, cfg.RequireWebSocket)
 			if wsOk {
 				r.WSOk = true
 			}
@@ -151,18 +146,7 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 		}
 	}
 
-	r.CalculateScores()
 	return r
-}
-
-func (c Config) timeoutFor(specific time.Duration) time.Duration {
-	if specific > 0 {
-		return specific
-	}
-	if c.Timeout > 0 {
-		return c.Timeout
-	}
-	return 5 * time.Second
 }
 
 // probeTCP measures a raw TCP connect time.
@@ -211,7 +195,7 @@ func probeTLS(ctx context.Context, ip net.IP, port int, sni string, timeout time
 
 // probeHTTP fetches /cdn-cgi/trace to confirm the IP is a real Cloudflare edge
 // and to determine the colo identifier.
-func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout, downloadTimeout, wsTimeout time.Duration, speedBytes int64, insecure bool, wsHost, wsPath string, requireWS bool) (
+func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout time.Duration, speedBytes int64, insecure bool, wsHost, wsPath string, requireWS bool) (
 	lat time.Duration, tlsOk bool, httpStatus int, colo string, throughput float64, wsOk bool,
 ) {
 	addr := fmt.Sprintf("%s:%d", ip.String(), port)
@@ -269,10 +253,10 @@ func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout, do
 
 	if httpStatus >= 200 && httpStatus < 400 && colo != "" {
 		if speedBytes > 0 {
-			throughput = probeDownload(ctx, ip, port, downloadTimeout, speedBytes)
+			throughput = probeDownload(ctx, ip, port, timeout, speedBytes)
 		}
 		if speedBytes > 0 || requireWS {
-			wsOk = probeWebSocket(ctx, ip, port, sni, wsHost, wsPath, wsTimeout)
+			wsOk = probeWebSocket(ctx, ip, port, sni, wsHost, wsPath, timeout)
 		}
 	}
 

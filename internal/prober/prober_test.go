@@ -122,3 +122,16 @@ func testCertificate() (tls.Certificate, error) {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	return tls.X509KeyPair(certPEM, keyPEM)
 }
+
+func TestTimeoutFallbacks(t *testing.T) {
+	cfg := Config{Timeout: 5 * time.Second, TCPTimeout: time.Second}
+	if got := cfg.timeoutFor(cfg.TCPTimeout); got != time.Second {
+		t.Fatalf("specific timeout = %v, want 1s", got)
+	}
+	if got := cfg.timeoutFor(cfg.TLSTimeout); got != 5*time.Second {
+		t.Fatalf("fallback timeout = %v, want 5s", got)
+	}
+	if got := (Config{}).timeoutFor(0); got != 5*time.Second {
+		t.Fatalf("default timeout = %v, want 5s", got)
+	}
+}

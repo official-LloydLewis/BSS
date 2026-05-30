@@ -107,18 +107,17 @@ func (s *Source) Stream(ctx context.Context, count int) <-chan net.IP {
 	ch := make(chan net.IP, 64)
 	go func() {
 		defer close(ch)
-		seen := make(map[string]struct{})
+		seen4 := make(map[uint32]struct{})
+		seen6 := make(map[string]struct{})
 		sent := 0
 		for {
 			if count > 0 && sent >= count {
 				return
 			}
 			ip := s.Random()
-			key := ip.String()
-			if _, dup := seen[key]; dup {
+			if isDuplicateIP(ip, seen4, seen6) {
 				continue
 			}
-			seen[key] = struct{}{}
 			select {
 			case <-ctx.Done():
 				return
@@ -266,4 +265,21 @@ func netsToStrings(nets []*net.IPNet) []string {
 		s[i] = n.String()
 	}
 	return s
+}
+
+func isDuplicateIP(ip net.IP, seen4 map[uint32]struct{}, seen6 map[string]struct{}) bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		key := binary.BigEndian.Uint32(ip4)
+		if _, ok := seen4[key]; ok {
+			return true
+		}
+		seen4[key] = struct{}{}
+		return false
+	}
+	key := ip.String()
+	if _, ok := seen6[key]; ok {
+		return true
+	}
+	seen6[key] = struct{}{}
+	return false
 }

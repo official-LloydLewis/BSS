@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"reflect"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,9 +15,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/matinsenpai/senpaiscanner/internal/configgen"
+	"github.com/matinsenpai/senpaiscanner/internal/config"
 	"github.com/matinsenpai/senpaiscanner/internal/engine"
-	"github.com/matinsenpai/senpaiscanner/internal/history"
 	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
 	"github.com/matinsenpai/senpaiscanner/internal/output"
 	"github.com/matinsenpai/senpaiscanner/internal/prober"
@@ -25,43 +24,10 @@ import (
 	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
 )
 
-type scanManager struct {
-	mu     sync.Mutex
-	cancel context.CancelFunc
-}
-
-func (s *scanManager) SetCancel(cancel context.CancelFunc) {
-	s.mu.Lock()
-	s.cancel = cancel
-	s.mu.Unlock()
-}
-
-func (s *scanManager) Cancel() {
-	s.mu.Lock()
-	cancel := s.cancel
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-}
-
-func (s *scanManager) Clear(cancel context.CancelFunc) {
-	s.mu.Lock()
-	if sameCancel(s.cancel, cancel) {
-		s.cancel = nil
-	}
-	s.mu.Unlock()
-}
-
-var scans scanManager
+// scanCancel holds the cancel function for the active scan so the TUI can
+// abort it when the user presses esc/q.
+var scanCancel context.CancelFunc
 var scanIDCounter atomic.Int64
-
-func sameCancel(a, b context.CancelFunc) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
-}
 
 func nextScanID() int64 { return scanIDCounter.Add(1) }
 
@@ -77,7 +43,9 @@ func StartScanCmd(cfg ScanConfig, scanID int64) tea.Cmd {
 // CancelScanCmd cancels the running scan.
 func CancelScanCmd() tea.Cmd {
 	return func() tea.Msg {
-		scans.Cancel()
+		if scanCancel != nil {
+			scanCancel()
+		}
 		return nil
 	}
 }
@@ -147,42 +115,36 @@ func runScan(cfg ScanConfig, scanID int64) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ctx = engine.WithStopCancel(ctx, cancel)
-	scans.SetCancel(cancel)
-	defer scans.Clear(cancel)
+	scanCancel = cancel
 	defer cancel()
 
-	engineStopAfter := cfg.StopAfterHealthy
-	if strings.TrimSpace(cfg.ColoFilter) != "" {
-		engineStopAfter = 0
-	}
 	engCfg := engine.Config{
-		Concurrency:      concurrency,
-		StopAfterHealthy: engineStopAfter,
+		Concurrency: concurrency,
+		PipelineConfig: engine.PipelineConfig{
+			Enabled:           cfg.Staged,
+			DiscoveryWorkers:  concurrency,
+			ValidationWorkers: max(concurrency/2, 1),
+			SpeedWorkers:      max(concurrency/5, 1),
+			CandidateLimit:    max(config.ScanDefaults.Top*10, concurrency),
+		},
 		ProbeConfig: prober.Config{
-			Port:       port,
-			Mode:       mode,
-			Tries:      tries,
-			Timeout:    timeout,
-			SNI:        cfg.SNI,
-			SpeedBytes: speedSampleForMode(mode),
-			WSTest:     false,
+			Port:             port,
+			Mode:             mode,
+			Tries:            tries,
+			Timeout:          timeout,
+			SNI:              cfg.SNI,
+			SpeedBytes:       speedSampleForMode(mode),
+			RequireWebSocket: mode == prober.ModeHTTP && speedSampleForMode(mode) > 0,
 		},
 	}
 	eng := engine.New(engCfg)
 
-	coloSet := buildColoSet(cfg.ColoFilter)
-	var healthyForStop atomic.Int64
-	var resultsMu sync.Mutex
-	var goodIPs []string
-	var badIPs []string
+	coloSet, scoreOpts := buildColoPolicy(cfg.ColoFilter)
 
 	var writer *output.Writer
 	if cfg.OutputFile != "" {
-		fmt2, e := output.DetectFormat(cfg.OutputFile)
-		if e != nil {
-			sendError(scanID, fmt.Sprintf("Output disabled: %v", e))
-		} else if w, e := output.New(cfg.OutputFile, fmt2); e == nil {
+		fmt2 := output.DetectFormat(cfg.OutputFile)
+		if w, e := output.New(cfg.OutputFile, fmt2); e == nil {
 			writer = w
 			defer writer.Close()
 		} else {
@@ -191,28 +153,14 @@ func runScan(cfg ScanConfig, scanID int64) {
 	}
 
 	ipStream := src.Stream(ctx, count)
-	if cfg.Emergency {
-		ipStream = emergencyIPStream(ctx, src, count)
-	}
 	eng.Run(ctx, ipStream, func(r *result.Result) {
 		if prog != nil {
 			s := eng.Stats()
 			prog.Send(StatsMsg{ScanID: scanID, Tested: s.Tested.Load(), Healthy: s.Healthy.Load(), Failed: s.Failed.Load(), InFlight: s.InFlight.Load()})
 		}
+		r.CalculateScoresWithOptions(scoreOpts)
 		if !passesColoFilter(r, coloSet) {
 			return
-		}
-		if r.IsHealthy() {
-			resultsMu.Lock()
-			goodIPs = append(goodIPs, r.IP.String())
-			resultsMu.Unlock()
-			if cfg.StopAfterHealthy > 0 && healthyForStop.Add(1) >= int64(cfg.StopAfterHealthy) {
-				cancel()
-			}
-		} else if cfg.Emergency {
-			resultsMu.Lock()
-			badIPs = append(badIPs, r.IP.String())
-			resultsMu.Unlock()
 		}
 		// Only healthy IPs go to the output file; writing every scanned IP
 		// would flood the file with thousands of failed probes.
@@ -226,13 +174,6 @@ func runScan(cfg ScanConfig, scanID int64) {
 		}
 	})
 
-	if cfg.Emergency {
-		resultsMu.Lock()
-		goodCopy := append([]string(nil), goodIPs...)
-		badCopy := append([]string(nil), badIPs...)
-		resultsMu.Unlock()
-		runEmergencyExports(scanID, cfg, goodCopy, badCopy, port)
-	}
 	sendDone(scanID)
 }
 
@@ -250,19 +191,19 @@ func runTest(ipFile string, scanID int64) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	scans.SetCancel(cancel)
-	defer scans.Clear(cancel)
+	scanCancel = cancel
 	defer cancel()
 
 	engCfg := engine.Config{
 		Concurrency: 20,
 		ProbeConfig: prober.Config{
-			Port:       443,
-			Mode:       prober.ModeHTTP,
-			Tries:      6,
-			Timeout:    10 * time.Second,
-			SNI:        "speed.cloudflare.com",
-			SpeedBytes: 512 * 1024,
+			Port:             443,
+			Mode:             prober.ModeHTTP,
+			Tries:            6,
+			Timeout:          10 * time.Second,
+			SNI:              "speed.cloudflare.com",
+			SpeedBytes:       512 * 1024,
+			RequireWebSocket: true,
 		},
 	}
 	eng := engine.New(engCfg)
@@ -287,8 +228,7 @@ func runColos(scanID int64) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	scans.SetCancel(cancel)
-	defer scans.Clear(cancel)
+	scanCancel = cancel
 	defer cancel()
 
 	engCfg := engine.Config{
@@ -338,29 +278,223 @@ func sendColosDone(scanID int64) {
 	}
 }
 
+// runConfigPhase1 runs Phase 1 of "Scan with Config": a fast connectivity scan
+// that finds healthy Cloudflare IPs (or validates IPs from a file), then signals
+// the UI to start Phase 2 (xray validation) with the best candidates.
+func runConfigPhase1(opts configPhase1Options) {
+	probeCfg, err := configProbeFromURL(opts.rawURL, opts.timeout)
+	if err != nil {
+		if prog != nil {
+			prog.Send(ConfigPhase1ErrMsg{Err: fmt.Sprintf("invalid URL: %v", err)})
+		}
+		return
+	}
+	ports := opts.ports
+	if len(ports) == 0 {
+		ports = []int{probeCfg.Port}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	scanCancel = cancel
+	defer cancel()
+
+	callback := func(r *result.Result) {
+		if prog != nil {
+			prog.Send(ConfigPhase1ResultMsg{Result: r})
+		}
+	}
+
+	var ipStream <-chan net.IP
+	if opts.fromFile {
+		ips, err := loadDefaultIPsFile()
+		if err != nil {
+			if prog != nil {
+				prog.Send(ConfigPhase1ErrMsg{Err: err.Error()})
+			}
+			return
+		}
+		if len(ips) == 0 {
+			if prog != nil {
+				prog.Send(ConfigPhase1ErrMsg{Err: "ips.txt is empty — add one IP per line"})
+			}
+			return
+		}
+		ch := make(chan net.IP, len(ips))
+		for _, ip := range ips {
+			ch <- ip
+		}
+		close(ch)
+		ipStream = ch
+	} else {
+		src, err := ipsrc.New(true, false, nil)
+		if err != nil {
+			if prog != nil {
+				prog.Send(ConfigPhase1DoneMsg{})
+			}
+			return
+		}
+		ipStream = src.Stream(ctx, opts.count)
+	}
+	runConfigPortProbes(ctx, ipStream, ports, opts.concurrency, probeCfg, callback)
+
+	if prog != nil {
+		prog.Send(ConfigPhase1DoneMsg{})
+	}
+}
+
+type configProbeJob struct {
+	ip   net.IP
+	port int
+}
+
+func runConfigPortProbes(ctx context.Context, ips <-chan net.IP, ports []int, concurrency int, base prober.Config, callback func(*result.Result)) {
+	if concurrency <= 0 {
+		concurrency = 50
+	}
+	jobs := make(chan configProbeJob, concurrency)
+	var wg sync.WaitGroup
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				callback(prober.Probe(ctx, job.ip, base.WithPort(job.port)))
+			}
+		}()
+	}
+
+	for ip := range ips {
+		for _, port := range ports {
+			select {
+			case <-ctx.Done():
+				close(jobs)
+				wg.Wait()
+				return
+			case jobs <- configProbeJob{ip: ip, port: port}:
+			}
+		}
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func configProbeFromURL(rawURL string, timeout time.Duration) (prober.Config, error) {
+	cfg, err := xraytest.ParseProxyURL(rawURL)
+	if err != nil {
+		return prober.Config{}, err
+	}
+
+	sni := cfg.SNI
+	if sni == "" {
+		sni = cfg.Host
+	}
+
+	probeCfg := prober.Config{
+		Port:               cfg.Port,
+		Mode:               prober.ModeHTTP,
+		Tries:              3,
+		Timeout:            timeout,
+		SNI:                sni,
+		InsecureSkipVerify: true,
+	}
+	if cfg.Network == "ws" {
+		probeCfg.WebSocketHost = cfg.Host
+		probeCfg.WebSocketPath = cfg.Path
+		probeCfg.RequireWebSocket = true
+	}
+	return probeCfg, nil
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
 func buildColoSet(raw string) map[string]bool {
-	if raw == "" {
-		return nil
-	}
-	set := make(map[string]bool)
-	for _, c := range strings.Split(raw, ",") {
-		c = strings.TrimSpace(strings.ToUpper(c))
-		if c != "" {
-			set[c] = true
-		}
-	}
+	set, _ := buildColoPolicy(raw)
 	return set
 }
 
+func buildColoPolicy(raw string) (map[string]bool, result.ScoreOptions) {
+	if raw == "" {
+		return nil, result.ScoreOptions{}
+	}
+	set := make(map[string]bool)
+	opts := result.ScoreOptions{PreferredColos: make(map[string]bool), BlockedColos: make(map[string]bool)}
+	for _, c := range strings.Split(raw, ",") {
+		c = strings.TrimSpace(strings.ToUpper(c))
+		if c == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(c, "!"):
+			if colo := strings.TrimPrefix(c, "!"); colo != "" {
+				opts.BlockedColos[colo] = true
+			}
+		case strings.HasPrefix(c, "+"):
+			if colo := strings.TrimPrefix(c, "+"); colo != "" {
+				opts.PreferredColos[colo] = true
+			}
+		default:
+			set[c] = true
+		}
+	}
+	if len(set) == 0 {
+		set = nil
+	}
+	if len(opts.PreferredColos) == 0 {
+		opts.PreferredColos = nil
+	}
+	if len(opts.BlockedColos) == 0 {
+		opts.BlockedColos = nil
+	}
+	return set, opts
+}
+
 func passesColoFilter(r *result.Result, set map[string]bool) bool {
+	if r.FailureReason == "blocked colo" {
+		return false
+	}
 	if set == nil {
 		return true
 	}
 	return set[strings.ToUpper(r.Colo)]
+}
+
+func ipsFileSearchPaths() []string {
+	seen := make(map[string]struct{})
+	add := func(paths *[]string, path string) {
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		*paths = append(*paths, path)
+	}
+
+	var paths []string
+	if wd, err := os.Getwd(); err == nil {
+		add(&paths, filepath.Join(wd, "ips.txt"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		add(&paths, filepath.Join(filepath.Dir(exe), "ips.txt"))
+	}
+	return paths
+}
+
+func loadDefaultIPsFile() ([]net.IP, error) {
+	for _, path := range ipsFileSearchPaths() {
+		ips, err := loadIPs(path)
+		if err == nil {
+			return ips, nil
+		}
+	}
+	return nil, fmt.Errorf("ips.txt not found — place it next to the binary or run folder")
 }
 
 func loadIPs(path string) ([]net.IP, error) {
@@ -415,127 +549,11 @@ func parseTimeout(raw string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-func emergencyIPStream(ctx context.Context, src *ipsrc.Source, count int) <-chan net.IP {
-	out := make(chan net.IP, 64)
-	go func() {
-		defer close(out)
-		sent := 0
-		seen := map[string]struct{}{}
-		bad, _ := history.LoadBad(".")
-		good, _ := history.LoadGood(".")
-		for _, rec := range good {
-			if count > 0 && sent >= count {
-				return
-			}
-			if history.ShouldSkipBad(bad, rec.IP) {
-				continue
-			}
-			ip := net.ParseIP(rec.IP)
-			if ip == nil {
-				continue
-			}
-			seen[rec.IP] = struct{}{}
-			select {
-			case <-ctx.Done():
-				return
-			case out <- ip:
-				sent++
-			}
-		}
-		for ip := range src.Stream(ctx, count) {
-			if count > 0 && sent >= count {
-				return
-			}
-			key := ip.String()
-			if _, ok := seen[key]; ok || history.ShouldSkipBad(bad, key) {
-				continue
-			}
-			seen[key] = struct{}{}
-			select {
-			case <-ctx.Done():
-				return
-			case out <- ip:
-				sent++
-			}
-		}
-	}()
-	return out
-}
-
-func runEmergencyExports(scanID int64, cfg ScanConfig, goodIPs, badIPs []string, port int) {
-	if err := history.SaveResults(".", goodIPs, badIPs, port); err != nil {
-		sendError(scanID, fmt.Sprintf("history save failed: %v", err))
+func parseBool(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "t", "true", "yes", "y", "on", "enabled":
+		return true
+	default:
+		return false
 	}
-	if err := output.WriteLines("good_ips.txt", goodIPs); err != nil {
-		sendError(scanID, fmt.Sprintf("good_ips.txt failed: %v", err))
-	}
-	ipPorts := make([]string, 0, len(goodIPs))
-	for _, ip := range goodIPs {
-		ipPorts = append(ipPorts, net.JoinHostPort(ip, strconv.Itoa(port)))
-	}
-	if err := output.WriteLines("ip_port.txt", ipPorts); err != nil {
-		sendError(scanID, fmt.Sprintf("ip_port.txt failed: %v", err))
-	}
-
-	base := strings.TrimSpace(cfg.BaseConfig)
-	if base == "" || len(goodIPs) == 0 {
-		_ = history.SaveLastWorking(".", goodIPs, nil)
-		return
-	}
-	ips := make([]net.IP, 0, len(goodIPs))
-	for _, s := range goodIPs {
-		if ip := net.ParseIP(s); ip != nil {
-			ips = append(ips, ip)
-		}
-	}
-	generated, err := configgen.Generate(base, ips)
-	if err != nil {
-		sendError(scanID, fmt.Sprintf("config generation failed: %v", err))
-		return
-	}
-	if err := output.WriteLines("generated_configs.txt", generated); err != nil {
-		sendError(scanID, fmt.Sprintf("generated_configs.txt failed: %v", err))
-	}
-	working, failed, stable := validateEmergencyConfigs(scanID, generated)
-	_ = output.WriteLines("working_configs.txt", working)
-	_ = output.WriteLines("failed_configs.txt", failed)
-	_ = output.WriteLines("stable_configs.txt", stable)
-	_ = history.SaveLastWorking(".", goodIPs, stable)
-}
-
-func validateEmergencyConfigs(scanID int64, configs []string) (working, failed, stable []string) {
-	limit := len(configs)
-	if limit > 10 {
-		limit = 10
-	}
-	for i := 0; i < limit; i++ {
-		raw := configs[i]
-		cfg, err := xraytest.ParseVLESS(raw)
-		if err != nil {
-			failed = append(failed, raw)
-			sendError(scanID, "Xray validation skipped for non-VLESS configs; generated_configs.txt was still written")
-			continue
-		}
-		ctx := context.Background()
-		vr := xraytest.ValidateConfig(ctx, cfg, 20*time.Second)
-		if prog != nil {
-			prog.Send(ConfigProgressMsg{Result: vr, Done: i + 1, Total: limit})
-		}
-		if !vr.Success {
-			failed = append(failed, raw)
-			continue
-		}
-		working = append(working, raw)
-		successes := 1
-		for attempt := 1; attempt < 3; attempt++ {
-			time.Sleep(500 * time.Millisecond)
-			if xraytest.ValidateConfig(ctx, cfg, 15*time.Second).Success {
-				successes++
-			}
-		}
-		if successes == 3 {
-			stable = append(stable, raw)
-		}
-	}
-	return working, failed, stable
 }

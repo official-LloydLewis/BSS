@@ -22,16 +22,14 @@ const (
 )
 
 // DetectFormat infers the output format from the file extension.
-func DetectFormat(path string) (Format, error) {
+func DetectFormat(path string) Format {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".csv":
-		return FormatCSV, nil
 	case ".json", ".jsonl":
-		return FormatJSON, nil
+		return FormatJSON
 	case ".txt":
-		return FormatTXT, nil
+		return FormatTXT
 	default:
-		return FormatCSV, fmt.Errorf("unknown output extension for %q (supported: .csv, .json, .jsonl, .txt)", path)
+		return FormatCSV
 	}
 }
 
@@ -51,9 +49,6 @@ type Writer struct {
 
 // New creates (or truncates) the output file and returns a ready Writer.
 func New(path string, fmt Format) (*Writer, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return nil, fmt2err(path, err)
-	}
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, fmt2err(path, err)
@@ -63,18 +58,12 @@ func New(path string, fmt Format) (*Writer, error) {
 
 	if fmt == FormatCSV {
 		w.csv = csv.NewWriter(f)
-		if err := w.csv.Write([]string{
+		_ = w.csv.Write([]string{
 			"ip", "loss_pct", "avg_ms", "min_ms", "max_ms",
 			"jitter_ms", "download_kbps", "speed_tested", "colo", "tls_ok", "ws_ok", "http_status",
-		}); err != nil {
-			f.Close()
-			return nil, err
-		}
+			"clean_score", "latency_score", "loss_score", "jitter_score", "speed_score", "stability_score", "protocol_score", "failure_reason",
+		})
 		w.csv.Flush()
-		if err := w.csv.Error(); err != nil {
-			f.Close()
-			return nil, err
-		}
 	}
 
 	return w, nil
@@ -82,6 +71,9 @@ func New(path string, fmt Format) (*Writer, error) {
 
 // Write appends a result to the output file.
 func (w *Writer) Write(r *result.Result) error {
+	if r.CleanScore == 0 && r.FailureReason == "" {
+		r.CalculateScores()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -120,6 +112,14 @@ func (w *Writer) writeCSV(r *result.Result) error {
 		boolStr(r.TLSOk),
 		boolStr(r.WSOk),
 		fmt.Sprintf("%d", r.HTTPStatus),
+		fmt.Sprintf("%.2f", r.CleanScore),
+		fmt.Sprintf("%.2f", r.LatencyScore),
+		fmt.Sprintf("%.2f", r.LossScore),
+		fmt.Sprintf("%.2f", r.JitterScore),
+		fmt.Sprintf("%.2f", r.SpeedScore),
+		fmt.Sprintf("%.2f", r.StabilityScore),
+		fmt.Sprintf("%.2f", r.ProtocolScore),
+		r.FailureReason,
 	}
 	w.csv.Write(row)
 	w.csv.Flush()
@@ -129,32 +129,48 @@ func (w *Writer) writeCSV(r *result.Result) error {
 // writeJSON appends one JSONL record (no trailing comma, no enclosing array).
 func (w *Writer) writeJSON(r *result.Result) error {
 	type jsonResult struct {
-		IP          string  `json:"ip"`
-		LossPct     float64 `json:"loss_pct"`
-		AvgMs       float64 `json:"avg_ms"`
-		MinMs       float64 `json:"min_ms"`
-		MaxMs       float64 `json:"max_ms"`
-		JitterMs    float64 `json:"jitter_ms"`
-		DownloadKB  float64 `json:"download_kbps,omitempty"`
-		SpeedTested bool    `json:"speed_tested,omitempty"`
-		Colo        string  `json:"colo,omitempty"`
-		TLSOk       bool    `json:"tls_ok"`
-		WSOk        bool    `json:"ws_ok"`
-		HTTPStatus  int     `json:"http_status,omitempty"`
+		IP             string  `json:"ip"`
+		LossPct        float64 `json:"loss_pct"`
+		AvgMs          float64 `json:"avg_ms"`
+		MinMs          float64 `json:"min_ms"`
+		MaxMs          float64 `json:"max_ms"`
+		JitterMs       float64 `json:"jitter_ms"`
+		DownloadKB     float64 `json:"download_kbps,omitempty"`
+		SpeedTested    bool    `json:"speed_tested,omitempty"`
+		Colo           string  `json:"colo,omitempty"`
+		TLSOk          bool    `json:"tls_ok"`
+		WSOk           bool    `json:"ws_ok"`
+		HTTPStatus     int     `json:"http_status,omitempty"`
+		CleanScore     float64 `json:"clean_score"`
+		LatencyScore   float64 `json:"latency_score"`
+		LossScore      float64 `json:"loss_score"`
+		JitterScore    float64 `json:"jitter_score"`
+		SpeedScore     float64 `json:"speed_score"`
+		StabilityScore float64 `json:"stability_score"`
+		ProtocolScore  float64 `json:"protocol_score"`
+		FailureReason  string  `json:"failure_reason,omitempty"`
 	}
 	obj := jsonResult{
-		IP:          r.IP.String(),
-		LossPct:     r.Loss(),
-		AvgMs:       ms(r.Avg()),
-		MinMs:       ms(r.Min()),
-		MaxMs:       ms(r.Max()),
-		JitterMs:    ms(r.Jitter()),
-		DownloadKB:  r.Throughput / 1024,
-		SpeedTested: r.SpeedTested,
-		Colo:        r.Colo,
-		TLSOk:       r.TLSOk,
-		WSOk:        r.WSOk,
-		HTTPStatus:  r.HTTPStatus,
+		IP:             r.IP.String(),
+		LossPct:        r.Loss(),
+		AvgMs:          ms(r.Avg()),
+		MinMs:          ms(r.Min()),
+		MaxMs:          ms(r.Max()),
+		JitterMs:       ms(r.Jitter()),
+		DownloadKB:     r.Throughput / 1024,
+		SpeedTested:    r.SpeedTested,
+		Colo:           r.Colo,
+		TLSOk:          r.TLSOk,
+		WSOk:           r.WSOk,
+		HTTPStatus:     r.HTTPStatus,
+		CleanScore:     r.CleanScore,
+		LatencyScore:   r.LatencyScore,
+		LossScore:      r.LossScore,
+		JitterScore:    r.JitterScore,
+		SpeedScore:     r.SpeedScore,
+		StabilityScore: r.StabilityScore,
+		ProtocolScore:  r.ProtocolScore,
+		FailureReason:  r.FailureReason,
 	}
 	b, err := json.Marshal(obj)
 	if err != nil {
@@ -187,22 +203,4 @@ func boolStr(b bool) string {
 
 func fmt2err(path string, err error) error {
 	return fmt.Errorf("opening output file %q: %w", path, err)
-}
-
-// WriteLines writes text lines to path, creating parent directories first.
-func WriteLines(path string, lines []string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt2err(path, err)
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt2err(path, err)
-	}
-	defer f.Close()
-	for _, line := range lines {
-		if _, err := f.WriteString(line + "\n"); err != nil {
-			return err
-		}
-	}
-	return nil
 }

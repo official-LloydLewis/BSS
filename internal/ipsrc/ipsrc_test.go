@@ -150,3 +150,17 @@ func TestNewWithOptionsCIDROnly(t *testing.T) {
 		t.Fatalf("expected no v6 CIDRs, got %d", len(s.v6Nets))
 	}
 }
+
+func TestIPv4DuplicateKeyUsesUint32(t *testing.T) {
+	seen4 := make(map[uint32]struct{})
+	seen6 := make(map[string]struct{})
+	if isDuplicateIP(net.ParseIP("192.0.2.1"), seen4, seen6) {
+		t.Fatal("first IPv4 should not be duplicate")
+	}
+	if !isDuplicateIP(net.ParseIP("192.0.2.1"), seen4, seen6) {
+		t.Fatal("second IPv4 should be duplicate")
+	}
+	if len(seen4) != 1 || len(seen6) != 0 {
+		t.Fatalf("unexpected seen maps: v4=%d v6=%d", len(seen4), len(seen6))
+	}
+}

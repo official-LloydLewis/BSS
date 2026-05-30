@@ -22,10 +22,8 @@ var builtinV4 string
 var builtinV6 string
 
 const (
-	cfIPsV4URL       = "https://www.cloudflare.com/ips-v4/"
-	cfIPsV6URL       = "https://www.cloudflare.com/ips-v6/"
-	maxUniqueSeen    = 1_000_000
-	maxCIDRExpansion = 1_000_000
+	cfIPsV4URL = "https://www.cloudflare.com/ips-v4/"
+	cfIPsV6URL = "https://www.cloudflare.com/ips-v6/"
 )
 
 // Source holds the CIDR ranges used for IP generation.
@@ -101,36 +99,25 @@ func (s *Source) Random() net.IP {
 // Stream emits random IPs on the returned channel until ctx is cancelled or
 // count IPs have been sent (count <= 0 means unlimited).
 //
-// For bounded scans, each IP is emitted at most once until the duplicate
-// tracking map reaches a safety cap. Unlimited scans do not keep an unbounded
-// seen map.
+// Each IP is emitted at most once per call: duplicates are silently skipped.
+// For very large counts relative to the available address space the loop may
+// spin for longer, but Cloudflare's published ranges are large enough that
+// this is not a practical concern for the scan sizes the TUI exposes.
 func (s *Source) Stream(ctx context.Context, count int) <-chan net.IP {
 	ch := make(chan net.IP, 64)
 	go func() {
 		defer close(ch)
-		var seen map[string]struct{}
-		if count > 0 {
-			seen = make(map[string]struct{}, min(count, maxUniqueSeen))
-		}
+		seen4 := make(map[uint32]struct{})
+		seen6 := make(map[string]struct{})
 		sent := 0
-		spins := 0
 		for {
 			if count > 0 && sent >= count {
 				return
 			}
 			ip := s.Random()
-			if seen != nil && len(seen) < maxUniqueSeen {
-				key := ip.String()
-				if _, dup := seen[key]; dup {
-					spins++
-					if spins > maxUniqueSeen {
-						return
-					}
-					continue
-				}
-				seen[key] = struct{}{}
+			if isDuplicateIP(ip, seen4, seen6) {
+				continue
 			}
-			spins = 0
 			select {
 			case <-ctx.Done():
 				return
@@ -143,15 +130,11 @@ func (s *Source) Stream(ctx context.Context, count int) <-chan net.IP {
 }
 
 // FromCIDR expands a single CIDR string into a channel of all its IPs.
-// Expansions larger than maxCIDRExpansion are rejected to avoid accidental
-// huge memory/time use; use Source.Stream sampling for large ranges.
+// For large ranges use caution — prefer Stream for /16 and above.
 func FromCIDR(ctx context.Context, cidr string) (<-chan net.IP, error) {
 	_, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid CIDR: %w", err)
-	}
-	if n := cidrSize(ipNet); n > maxCIDRExpansion {
-		return nil, fmt.Errorf("CIDR %s expands to %d IPs; maximum is %d", cidr, n, maxCIDRExpansion)
 	}
 
 	ch := make(chan net.IP, 128)
@@ -284,21 +267,19 @@ func netsToStrings(nets []*net.IPNet) []string {
 	return s
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+func isDuplicateIP(ip net.IP, seen4 map[uint32]struct{}, seen6 map[string]struct{}) bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		key := binary.BigEndian.Uint32(ip4)
+		if _, ok := seen4[key]; ok {
+			return true
+		}
+		seen4[key] = struct{}{}
+		return false
 	}
-	return b
-}
-
-func cidrSize(n *net.IPNet) uint64 {
-	ones, bits := n.Mask.Size()
-	if ones < 0 || bits < 0 {
-		return maxCIDRExpansion + 1
+	key := ip.String()
+	if _, ok := seen6[key]; ok {
+		return true
 	}
-	hostBits := bits - ones
-	if hostBits >= 63 {
-		return maxCIDRExpansion + 1
-	}
-	return 1 << uint(hostBits)
+	seen6[key] = struct{}{}
+	return false
 }

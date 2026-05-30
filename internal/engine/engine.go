@@ -15,11 +15,20 @@ import (
 
 // Config controls engine behaviour.
 type Config struct {
-	Concurrency      int
-	RateLimit        float64 // probes per second, <=0 means unlimited
-	StopAfterHealthy int     // cancel once this many healthy results are found; <=0 disables
-	StopHealthyFunc  func(*result.Result) bool
-	ProbeConfig      prober.Config
+	Concurrency    int
+	RateLimit      float64 // probes per second, <=0 means unlimited
+	ProbeConfig    prober.Config
+	PipelineConfig PipelineConfig
+}
+
+// PipelineConfig enables a conservative staged scan that avoids expensive
+// HTTP/download/WebSocket probes for candidates that fail quick discovery.
+type PipelineConfig struct {
+	Enabled           bool
+	DiscoveryWorkers  int
+	ValidationWorkers int
+	SpeedWorkers      int
+	CandidateLimit    int
 }
 
 // Stats exposes real-time counters.
@@ -34,19 +43,11 @@ type Stats struct {
 // worker goroutines, so implementations must be goroutine-safe.
 type ResultFunc func(*result.Result)
 
-type cancelKey struct{}
-
-// WithStopCancel attaches a cancel function that Engine can call when StopAfterHealthy is reached.
-func WithStopCancel(ctx context.Context, cancel context.CancelFunc) context.Context {
-	return context.WithValue(ctx, cancelKey{}, cancel)
-}
-
 // Engine orchestrates a pool of prober goroutines.
 type Engine struct {
-	cfg         Config
-	stats       Stats
-	stopHealthy atomic.Int64
-	limiter     *rate.Limiter
+	cfg     Config
+	stats   Stats
+	limiter *rate.Limiter
 }
 
 // New creates a new Engine.
@@ -69,6 +70,10 @@ func (e *Engine) Stats() *Stats {
 // Run consumes IPs from src, probes each one, and forwards results to fn.
 // It blocks until src is exhausted or ctx is cancelled.
 func (e *Engine) Run(ctx context.Context, src <-chan net.IP, fn ResultFunc) {
+	if e.cfg.PipelineConfig.Enabled {
+		e.RunStaged(ctx, src, fn)
+		return
+	}
 	sem := make(chan struct{}, e.cfg.Concurrency)
 	var wg sync.WaitGroup
 
@@ -110,11 +115,6 @@ func (e *Engine) Run(ctx context.Context, src <-chan net.IP, fn ResultFunc) {
 				e.stats.Tested.Add(1)
 				if r.IsHealthy() {
 					e.stats.Healthy.Add(1)
-					if e.shouldStopAfter(r) {
-						if canceler, ok := ctx.Value(cancelKey{}).(context.CancelFunc); ok {
-							canceler()
-						}
-					}
 				} else {
 					e.stats.Failed.Add(1)
 				}
@@ -134,18 +134,134 @@ func (e *Engine) RunList(ctx context.Context, ips []net.IP, fn ResultFunc) {
 
 	// Raise the timeout floor for the final validation round so slow IPs
 	// still get a fair chance rather than being cut off too early.
-	originalTimeout := e.cfg.ProbeConfig.Timeout
-	e.cfg.ProbeConfig.Timeout = max(e.cfg.ProbeConfig.Timeout, 10*time.Second)
-	defer func() { e.cfg.ProbeConfig.Timeout = originalTimeout }()
-	e.Run(ctx, ch, fn)
+	cfg := e.cfg
+	cfg.ProbeConfig.Timeout = max(cfg.ProbeConfig.Timeout, 10*time.Second)
+	e2 := New(cfg)
+	e2.Run(ctx, ch, fn)
 }
 
-func (e *Engine) shouldStopAfter(r *result.Result) bool {
-	if e.cfg.StopAfterHealthy <= 0 || !r.IsHealthy() {
-		return false
+// RunStaged probes in three conservative phases: quick TCP/TLS discovery,
+// Cloudflare HTTP validation, then the original expensive probe for best
+// candidates only. Direct scanning remains the default unless PipelineConfig is
+// enabled.
+func (e *Engine) RunStaged(ctx context.Context, src <-chan net.IP, fn ResultFunc) {
+	pipe := e.cfg.PipelineConfig
+	if pipe.DiscoveryWorkers <= 0 {
+		pipe.DiscoveryWorkers = max(e.cfg.Concurrency, 1)
 	}
-	if e.cfg.StopHealthyFunc != nil && !e.cfg.StopHealthyFunc(r) {
-		return false
+	if pipe.ValidationWorkers <= 0 {
+		pipe.ValidationWorkers = max(e.cfg.Concurrency/2, 1)
 	}
-	return e.stopHealthy.Add(1) >= int64(e.cfg.StopAfterHealthy)
+	if pipe.SpeedWorkers <= 0 {
+		pipe.SpeedWorkers = max(e.cfg.Concurrency/5, 1)
+	}
+	if pipe.CandidateLimit <= 0 {
+		pipe.CandidateLimit = max(e.cfg.Concurrency*2, 50)
+	}
+
+	discoveryCfg := e.cfg.ProbeConfig
+	discoveryCfg.Mode = prober.ModeTLS
+	if e.cfg.ProbeConfig.Mode == prober.ModeTCP {
+		discoveryCfg.Mode = prober.ModeTCP
+	}
+	discoveryCfg.Tries = 1
+	discoveryCfg.SpeedBytes = 0
+	discoveryCfg.RequireWebSocket = false
+	discoveryCfg.Timeout = minDuration(nonZeroDuration(discoveryCfg.Timeout, 2*time.Second), 2*time.Second)
+
+	validationCfg := e.cfg.ProbeConfig
+	validationCfg.Mode = prober.ModeHTTP
+	validationCfg.Tries = max(minInt(validationCfg.Tries, 2), 1)
+	validationCfg.SpeedBytes = 0
+	validationCfg.RequireWebSocket = false
+	validationCfg.Timeout = minDuration(nonZeroDuration(validationCfg.Timeout, 4*time.Second), 4*time.Second)
+
+	discovered := e.collectStage(ctx, src, pipe.DiscoveryWorkers, discoveryCfg)
+	if ctx.Err() != nil || len(discovered) == 0 {
+		return
+	}
+	discoveryCandidates := make([]*result.Result, 0, len(discovered))
+	for _, r := range discovered {
+		if r.Avg() > 0 && r.Loss() < 100 {
+			discoveryCandidates = append(discoveryCandidates, r)
+		}
+	}
+	if len(discoveryCandidates) == 0 {
+		return
+	}
+	validationInput := makeIPChan(discoveryCandidates)
+	validated := e.collectStage(ctx, validationInput, pipe.ValidationWorkers, validationCfg)
+	if ctx.Err() != nil || len(validated) == 0 {
+		return
+	}
+
+	var candidates []*result.Result
+	for _, r := range validated {
+		if r.IsHealthy() && r.Loss() < 50 && r.Avg() > 0 {
+			candidates = append(candidates, r)
+		}
+	}
+	result.Sort(candidates, result.SortByCleanScore)
+	if len(candidates) > pipe.CandidateLimit {
+		candidates = candidates[:pipe.CandidateLimit]
+	}
+	finalInput := makeIPChan(candidates)
+	e.runStage(ctx, finalInput, pipe.SpeedWorkers, e.cfg.ProbeConfig, fn)
+}
+
+func (e *Engine) collectStage(ctx context.Context, src <-chan net.IP, workers int, cfg prober.Config) []*result.Result {
+	var mu sync.Mutex
+	var out []*result.Result
+	e.runStage(ctx, src, workers, cfg, func(r *result.Result) {
+		mu.Lock()
+		out = append(out, r)
+		mu.Unlock()
+	})
+	return out
+}
+
+func (e *Engine) runStage(ctx context.Context, src <-chan net.IP, workers int, cfg prober.Config, fn ResultFunc) {
+	stageCfg := e.cfg
+	stageCfg.Concurrency = workers
+	stageCfg.PipelineConfig.Enabled = false
+	stageCfg.ProbeConfig = cfg
+	New(stageCfg).Run(ctx, src, func(r *result.Result) {
+		e.stats.Tested.Add(1)
+		if r.IsHealthy() {
+			e.stats.Healthy.Add(1)
+		} else {
+			e.stats.Failed.Add(1)
+		}
+		fn(r)
+	})
+}
+
+func makeIPChan(results []*result.Result) <-chan net.IP {
+	ch := make(chan net.IP, len(results))
+	for _, r := range results {
+		ch <- r.IP
+	}
+	close(ch)
+	return ch
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func nonZeroDuration(v, fallback time.Duration) time.Duration {
+	if v > 0 {
+		return v
+	}
+	return fallback
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

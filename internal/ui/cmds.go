@@ -15,7 +15,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/matinsenpai/senpaiscanner/internal/config"
 	"github.com/matinsenpai/senpaiscanner/internal/engine"
 	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
 	"github.com/matinsenpai/senpaiscanner/internal/output"
@@ -120,13 +119,6 @@ func runScan(cfg ScanConfig, scanID int64) {
 
 	engCfg := engine.Config{
 		Concurrency: concurrency,
-		PipelineConfig: engine.PipelineConfig{
-			Enabled:           cfg.Staged,
-			DiscoveryWorkers:  concurrency,
-			ValidationWorkers: max(concurrency/2, 1),
-			SpeedWorkers:      max(concurrency/5, 1),
-			CandidateLimit:    max(config.ScanDefaults.Top*10, concurrency),
-		},
 		ProbeConfig: prober.Config{
 			Port:             port,
 			Mode:             mode,
@@ -139,7 +131,7 @@ func runScan(cfg ScanConfig, scanID int64) {
 	}
 	eng := engine.New(engCfg)
 
-	coloSet, scoreOpts := buildColoPolicy(cfg.ColoFilter)
+	coloSet := buildColoSet(cfg.ColoFilter)
 
 	var writer *output.Writer
 	if cfg.OutputFile != "" {
@@ -158,7 +150,6 @@ func runScan(cfg ScanConfig, scanID int64) {
 			s := eng.Stats()
 			prog.Send(StatsMsg{ScanID: scanID, Tested: s.Tested.Load(), Healthy: s.Healthy.Load(), Failed: s.Failed.Load(), InFlight: s.InFlight.Load()})
 		}
-		r.CalculateScoresWithOptions(scoreOpts)
 		if !passesColoFilter(r, coloSet) {
 			return
 		}
@@ -414,50 +405,20 @@ func configProbeFromURL(rawURL string, timeout time.Duration) (prober.Config, er
 // ---------------------------------------------------------------------------
 
 func buildColoSet(raw string) map[string]bool {
-	set, _ := buildColoPolicy(raw)
-	return set
-}
-
-func buildColoPolicy(raw string) (map[string]bool, result.ScoreOptions) {
 	if raw == "" {
-		return nil, result.ScoreOptions{}
+		return nil
 	}
 	set := make(map[string]bool)
-	opts := result.ScoreOptions{PreferredColos: make(map[string]bool), BlockedColos: make(map[string]bool)}
 	for _, c := range strings.Split(raw, ",") {
 		c = strings.TrimSpace(strings.ToUpper(c))
-		if c == "" {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(c, "!"):
-			if colo := strings.TrimPrefix(c, "!"); colo != "" {
-				opts.BlockedColos[colo] = true
-			}
-		case strings.HasPrefix(c, "+"):
-			if colo := strings.TrimPrefix(c, "+"); colo != "" {
-				opts.PreferredColos[colo] = true
-			}
-		default:
+		if c != "" {
 			set[c] = true
 		}
 	}
-	if len(set) == 0 {
-		set = nil
-	}
-	if len(opts.PreferredColos) == 0 {
-		opts.PreferredColos = nil
-	}
-	if len(opts.BlockedColos) == 0 {
-		opts.BlockedColos = nil
-	}
-	return set, opts
+	return set
 }
 
 func passesColoFilter(r *result.Result, set map[string]bool) bool {
-	if r.FailureReason == "blocked colo" {
-		return false
-	}
 	if set == nil {
 		return true
 	}
@@ -547,13 +508,4 @@ func parseTimeout(raw string, fallback time.Duration) time.Duration {
 		return time.Duration(seconds) * time.Second
 	}
 	return fallback
-}
-
-func parseBool(raw string) bool {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "1", "t", "true", "yes", "y", "on", "enabled":
-		return true
-	default:
-		return false
-	}
 }

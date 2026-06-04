@@ -139,6 +139,8 @@ Without a config URL, Phase 1 uses a standard Cloudflare HTTP probe (`speed.clou
 
 Phase 1 result tables include a **SCORE** column: a quality score that favors lower loss, jitter, and latency, higher throughput, and successful protocol validation.
 
+For Phase 1-only scans, press **`c`** after the scan finishes to copy unique raw healthy IP addresses, one IP per line and without ports, in quality order. The same list is saved to `healthy_ips_raw.txt` beside the live `BSSResult-YYYYMMDD-HHMMSS.txt` file.
+
 Press `q` / `Esc` to cancel and return to the menu.
 
 ### Phase 2 — xray validation

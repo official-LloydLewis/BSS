@@ -278,3 +278,93 @@ func TestRawIPOutputFormat(t *testing.T) {
 		t.Fatalf("raw IP output = %q, want %q", got, want)
 	}
 }
+
+func TestPhase1RawHealthyIPsDeduplicateAndFollowQualityOrder(t *testing.T) {
+	results := []*result.Result{
+		phase1HealthyResult("104.18.1.1", 443, 200*time.Millisecond),
+		phase1HealthyResult("104.18.1.2", 443, 50*time.Millisecond),
+		phase1HealthyResult("104.18.1.2", 8443, 100*time.Millisecond),
+		phase1HealthyResult("104.18.1.3", 443, 150*time.Millisecond),
+	}
+
+	got := rawHealthyIPs(results)
+	want := []string{"104.18.1.2", "104.18.1.3", "104.18.1.1"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("raw healthy IPs = %v, want %v", got, want)
+	}
+	for _, ip := range got {
+		if strings.Contains(ip, ":") {
+			t.Fatalf("raw healthy IP %q contains a port", ip)
+		}
+	}
+}
+
+func TestCopyPhase1HealthyEndpointsCopiesRawIPsAndWritesLiveResultDirectory(t *testing.T) {
+	dir := t.TempDir()
+	oldWriter := liveResultWriter
+	oldClipboardWriteAll := clipboardWriteAll
+	t.Cleanup(func() {
+		liveResultWriter = oldWriter
+		clipboardWriteAll = oldClipboardWriteAll
+	})
+
+	liveResultWriter = &LiveResultWriter{path: filepath.Join(dir, "BSSResult-20260604-120000.txt")}
+	var clipboardText string
+	clipboardWriteAll = func(text string) error {
+		clipboardText = text
+		return nil
+	}
+
+	m := AppModel{configPhase1Results: []*result.Result{
+		phase1HealthyResult("104.18.1.1", 443, 200*time.Millisecond),
+		phase1HealthyResult("104.18.1.2", 8443, 50*time.Millisecond),
+		phase1HealthyResult("104.18.1.2", 2053, 100*time.Millisecond),
+	}}
+	message := m.copyPhase1RawHealthyIPs()
+
+	want := "104.18.1.2\n104.18.1.1\n"
+	if clipboardText != want {
+		t.Fatalf("clipboard output = %q, want %q", clipboardText, want)
+	}
+	if strings.Contains(clipboardText, ":") {
+		t.Fatalf("clipboard output contains ports: %q", clipboardText)
+	}
+
+	path := filepath.Join(dir, "healthy_ips_raw.txt")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); got != want {
+		t.Fatalf("healthy_ips_raw.txt = %q, want %q", got, want)
+	}
+	if !strings.Contains(message, "copied 2 raw healthy IPs") {
+		t.Fatalf("success message missing copy detail: %q", message)
+	}
+	if !strings.Contains(message, "saved raw IPs to healthy_ips_raw.txt") {
+		t.Fatalf("success message missing save detail: %q", message)
+	}
+}
+
+func TestPhase1DoneHintSaysCopyRawHealthyIPs(t *testing.T) {
+	m := NewApp("test")
+	m.page = PageConfigPhase1
+	m.configPhase1Done = true
+	m.configPhase1Only = true
+	view := ansiRE.ReplaceAllString(m.viewConfigPhase1(), "")
+	if !strings.Contains(view, "c copy raw healthy IPs") {
+		t.Fatalf("Phase 1 hint missing raw IP copy text: %q", view)
+	}
+}
+
+func phase1HealthyResult(ip string, port int, latency time.Duration) *result.Result {
+	return &result.Result{
+		IP:         net.ParseIP(ip),
+		Port:       port,
+		ProbeMode:  "http",
+		Latencies:  []time.Duration{latency},
+		TLSOk:      true,
+		HTTPStatus: 200,
+		Colo:       "TEST",
+	}
+}

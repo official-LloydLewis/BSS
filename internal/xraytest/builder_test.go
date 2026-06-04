@@ -156,3 +156,32 @@ func TestBuildXrayConfig_AddressSwap(t *testing.T) {
 		t.Errorf("SNI should remain example.com, got %v", tlsSettings["serverName"])
 	}
 }
+
+func TestBuildXrayConfig_ParsedTrojan(t *testing.T) {
+	cfg, err := ParseProxyURL("trojan://secret@example.com:443?security=tls&sni=example.com&type=ws&host=example.com&path=%2Fproxy#test")
+	if err != nil {
+		t.Fatalf("ParseProxyURL failed: %v", err)
+	}
+
+	configBytes, err := BuildXrayConfig(cfg, 10812)
+	if err != nil {
+		t.Fatalf("BuildXrayConfig failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(configBytes, &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	outbounds := config["outbounds"].([]interface{})
+	proxy := outbounds[0].(map[string]interface{})
+	if got := proxy["protocol"]; got != "trojan" {
+		t.Fatalf("protocol: got %v, want trojan", got)
+	}
+	settings := proxy["settings"].(map[string]interface{})
+	servers := settings["servers"].([]interface{})
+	server := servers[0].(map[string]interface{})
+	if got := server["password"]; got != "secret" {
+		t.Fatalf("password: got %v, want secret", got)
+	}
+}

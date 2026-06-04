@@ -195,6 +195,8 @@ func (w *LiveResultWriter) writeLocked() error {
 			status := "healthy"
 			if !r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 				status = "fail"
+			} else if r.SpeedTested && r.Throughput <= 0 {
+				status = "healthy; speed fail"
 			}
 			sb.WriteString(fmt.Sprintf("  %-22s  %7.1f  %9.2f  %10.2f  %11s  %6.1f%%  %-8s  %s\n",
 				formatEndpoint(r.IP.String(), r.Port),

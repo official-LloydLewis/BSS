@@ -93,3 +93,16 @@ func TestResolveTopNPreset(t *testing.T) {
 		t.Fatalf("topN = %d, want 50", got)
 	}
 }
+
+func TestLiveResultWriterIncludesSpeedDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	w := &LiveResultWriter{path: filepath.Join(dir, "result.txt"), started: time.Now(), phase: 1, phase1Seen: make(map[string]struct{})}
+	w.SetDiscoveryStats(phase1DiscoveryStats{SpeedTestsScheduled: 3, SpeedTestsStarted: 2, SpeedTestsCompleted: 2, SpeedTestsFailed: 1})
+	b, err := os.ReadFile(w.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "Speed tests scheduled/started/completed/failed: 3/2/2/1") {
+		t.Fatalf("missing diagnostics:\n%s", b)
+	}
+}

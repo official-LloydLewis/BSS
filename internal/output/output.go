@@ -110,6 +110,7 @@ func (w *Writer) writeCSV(r *result.Result) error {
 		fmt.Sprintf("%d", r.DownloadBytes),
 		fmt.Sprintf("%.2f", float64(r.DownloadElapsed)/float64(time.Millisecond)),
 		boolStr(r.SpeedTested),
+		r.SpeedTestError,
 		r.Colo,
 		boolStr(r.TLSOk),
 		boolStr(r.WSOk),

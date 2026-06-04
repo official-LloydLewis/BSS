@@ -2743,6 +2743,9 @@ func (m AppModel) viewConfigPhase1() string {
 			if !r.IsHealthy() {
 				status = "✗"
 				lineStyle = styleBad
+			} else if r.SpeedTested && r.Throughput <= 0 {
+				status = "!"
+				lineStyle = styleWarn
 			}
 			line := fmt.Sprintf("  %-22s  %7.1f   %9.2f  %10.2f  %11s  %6.1f%%  %-8s  %6s",
 				formatEndpoint(r.IP.String(), r.Port), r.QualityScore(),

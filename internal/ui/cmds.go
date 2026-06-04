@@ -528,6 +528,12 @@ func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports 
 			if addedForSeed > 0 {
 				stats.SeedsExpanded++
 			}
+			if addedForSeed > 0 {
+				stats.SeedsExpanded++
+			}
+		}
+		if neighbor.onStats != nil {
+			neighbor.onStats(stats)
 		}
 		if neighbor.onStats != nil {
 			neighbor.onStats(stats)

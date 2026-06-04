@@ -165,3 +165,33 @@ func testCertificate() (tls.Certificate, error) {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	return tls.X509KeyPair(certPEM, keyPEM)
 }
+
+func TestProbeTCPStoresConnectLatencySeparately(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}()
+
+	host, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	portNum, err := net.LookupPort("tcp", port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := Probe(context.Background(), net.ParseIP(host), Config{Port: portNum, Mode: ModeTCP, Tries: 1, Timeout: time.Second})
+	if len(r.ConnectLatencies) != 1 || r.ConnectLatencies[0] <= 0 {
+		t.Fatalf("ConnectLatencies = %v, want one successful TCP connect measurement", r.ConnectLatencies)
+	}
+	if r.ConnectLatencies[0] != r.Latencies[0] {
+		t.Fatalf("TCP connect latency = %v, probe latency = %v; TCP mode should match", r.ConnectLatencies[0], r.Latencies[0])
+	}
+}

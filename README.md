@@ -137,7 +137,7 @@ Press **Enter** on the last row to continue to the optional config step.
 
 Without a config URL, Phase 1 uses a standard Cloudflare HTTP probe (`speed.cloudflare.com`, 64 KiB sample). With a config URL, probes use SNI/host/path from your link and require WebSocket success when `type=ws`.
 
-Phase 1 result tables include a **SCORE** column: a quality score that favors lower loss, jitter, and latency, higher throughput, and successful protocol validation.
+Phase 1 result tables separate **RTT(ms)** from **PROBE(ms)**. RTT is the TCP connect duration used for latency ranking, while PROBE is the full protocol validation duration (TCP only, TCP+TLS, or TCP+TLS+HTTP response headers depending on mode). The **SCORE** column favors lower RTT, loss, and jitter, higher throughput, and successful protocol validation.
 
 For Phase 1-only scans, press **`c`** after the scan finishes to copy unique raw healthy IP addresses, one IP per line and without ports, in quality order. The same list is saved to `healthy_ips_raw.txt` beside the live `BSSResult-YYYYMMDD-HHMMSS.txt` file.
 

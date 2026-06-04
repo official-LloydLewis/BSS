@@ -1039,14 +1039,25 @@ func rawIPsFromEndpoints(endpoints []string) []string {
 }
 
 func writeRawIPsBesideLiveResult(ips []string) (string, error) {
+	livePath := ""
+	if liveResultWriter != nil {
+		livePath = liveResultWriter.path
+	}
+	return writeRawIPsBesideResultPath(livePath, ips)
+}
+
+func writeRawIPsBesideResultPath(livePath string, ips []string) (string, error) {
 	dir := ""
-	if liveResultWriter != nil && liveResultWriter.path != "" {
-		dir = filepath.Dir(liveResultWriter.path)
+	if livePath != "" {
+		dir = filepath.Dir(livePath)
 	} else if dirs := resultFileDirs(); len(dirs) > 0 {
 		dir = dirs[0]
 	}
 	if dir == "" {
 		dir = "."
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
 	}
 	path := filepath.Join(dir, "healthy_ips_raw.txt")
 	return path, writeIPsFile(path, ips)
@@ -1422,9 +1433,9 @@ func (m AppModel) viewLiveScan() string {
 	))
 
 	// Table header
-	hdr := fmt.Sprintf("  %-18s  %7s  %7s  %9s  %8s  %9s  %5s  %-6s",
-		"IP", "SCORE", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
-	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 81))))
+	hdr := fmt.Sprintf("  %-18s  %7s  %7s  %9s  %10s  %9s  %5s  %-6s",
+		"IP", "SCORE", "LOSS", "RTT(ms)", "PROBE(ms)", "DL(KB/s)", "TLS", "COLO")
+	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 84))))
 
 	maxRows := m.height - 14
 	if maxRows < 3 {
@@ -1444,15 +1455,15 @@ func (m AppModel) viewLiveScan() string {
 		if colo == "" {
 			colo = "—"
 		}
-		line := fmt.Sprintf("  %-18s  %7.1f  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
+		line := fmt.Sprintf("  %-18s  %7.1f  %6.1f%%  %9.2f  %10.2f  %9.1f  %5s  %-6s",
 			r.IP.String(), r.QualityScore(), r.Loss(),
+			float64(r.RTT().Milliseconds()),
 			float64(r.Avg().Milliseconds()),
-			float64(r.Jitter().Milliseconds()),
 			r.Throughput/1024,
 			tlsIcon, colo)
 
 		switch {
-		case r.IsHealthy() && r.Loss() == 0 && r.Avg().Milliseconds() < 200:
+		case r.IsHealthy() && r.Loss() == 0 && r.RTT().Milliseconds() < 200:
 			sb.WriteString(fmt.Sprintf("%s\n", styleGood.Render(line)))
 		case !r.IsHealthy():
 			sb.WriteString(fmt.Sprintf("%s\n", styleBad.Render(line)))
@@ -1462,7 +1473,7 @@ func (m AppModel) viewLiveScan() string {
 	}
 
 	sb.WriteRune('\n')
-	sortNames := []string{"avg", "loss", "jitter", "colo", "speed"}
+	sortNames := []string{"rtt", "loss", "jitter", "colo", "speed"}
 	hint := fmt.Sprintf("  s sort(→%s)   c copy IPs   q/esc back", sortNames[m.sortIdx%5])
 	if m.scanDone {
 		hint = fmt.Sprintf("  s sort(→%s)   c copy IPs   enter/q → results", sortNames[m.sortIdx%5])
@@ -1488,9 +1499,9 @@ func (m AppModel) viewResults() string {
 	if len(top) == 0 {
 		sb.WriteString(styleWarn.Render("  No healthy IPs found. Try raising timeout, lowering workers, or using a different SNI.\n"))
 	} else {
-		hdr := fmt.Sprintf("  %-18s  %7s  %7s  %9s  %8s  %9s  %5s  %-6s",
-			"IP", "SCORE", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
-		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 81))))
+		hdr := fmt.Sprintf("  %-18s  %7s  %7s  %9s  %10s  %9s  %5s  %-6s",
+			"IP", "SCORE", "LOSS", "RTT(ms)", "PROBE(ms)", "DL(KB/s)", "TLS", "COLO")
+		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 84))))
 
 		for i, r := range top {
 			tlsIcon := "✗"
@@ -1502,10 +1513,10 @@ func (m AppModel) viewResults() string {
 				colo = "—"
 			}
 			rank := styleAccent.Render(fmt.Sprintf(" %2d. ", i+1))
-			line := fmt.Sprintf("%-18s  %7.1f  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
+			line := fmt.Sprintf("%-18s  %7.1f  %6.1f%%  %9.2f  %10.2f  %9.1f  %5s  %-6s",
 				r.IP.String(), r.QualityScore(), r.Loss(),
+				float64(r.RTT().Milliseconds()),
 				float64(r.Avg().Milliseconds()),
-				float64(r.Jitter().Milliseconds()),
 				r.Throughput/1024,
 				tlsIcon, colo)
 			sb.WriteString(fmt.Sprintf("%s%s\n", rank, styleGood.Render(line)))
@@ -1594,10 +1605,10 @@ func PrintTable(results []*result.Result, top int) {
 		sorted = sorted[:top]
 	}
 
-	hdr := fmt.Sprintf("  %-18s  %7s  %7s  %9s  %8s  %9s  %4s  %-5s",
-		"IP", "SCORE", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
+	hdr := fmt.Sprintf("  %-18s  %7s  %7s  %9s  %10s  %9s  %4s  %-5s",
+		"IP", "SCORE", "LOSS", "RTT(ms)", "PROBE(ms)", "DL(KB/s)", "TLS", "COLO")
 	fmt.Println(hdr)
-	fmt.Println("  " + strings.Repeat("─", 81))
+	fmt.Println("  " + strings.Repeat("─", 84))
 	for _, r := range sorted {
 		tls := "✗"
 		if r.TLSOk {
@@ -1607,10 +1618,10 @@ func PrintTable(results []*result.Result, top int) {
 		if colo == "" {
 			colo = "—"
 		}
-		fmt.Printf("  %-18s  %7.1f  %6.1f%%  %9.2f  %8.2f  %9.1f  %4s  %-5s\n",
+		fmt.Printf("  %-18s  %7.1f  %6.1f%%  %9.2f  %10.2f  %9.1f  %4s  %-5s\n",
 			r.IP.String(), r.QualityScore(), r.Loss(),
+			float64(r.RTT().Milliseconds()),
 			float64(r.Avg().Milliseconds()),
-			float64(r.Jitter().Milliseconds()),
 			r.Throughput/1024,
 			tls, colo)
 	}
@@ -2686,9 +2697,9 @@ func (m AppModel) viewConfigPhase1() string {
 	}
 
 	if len(m.configPhase1Results) > 0 {
-		hdr := fmt.Sprintf("  %-22s  %8s %7s  %10s %-8s  %6s",
-			"ENDPOINT", "SCORE", "LOSS", "AVG(ms)", "COLO", "STATUS")
-		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 74))))
+		hdr := fmt.Sprintf("  %-22s  %8s  %9s  %10s  %7s  %-8s  %6s",
+			"ENDPOINT", "SCORE", "RTT(ms)", "PROBE(ms)", "LOSS", "COLO", "STATUS")
+		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 98))))
 
 		top := result.TopN(m.configPhase1Results, 20)
 		for _, r := range top {
@@ -2702,9 +2713,9 @@ func (m AppModel) viewConfigPhase1() string {
 				status = "✗"
 				lineStyle = styleBad
 			}
-			line := fmt.Sprintf("  %-22s  %7.1f  %6.1f%%  %9.2f  %-8s  %6s",
-				formatEndpoint(r.IP.String(), r.Port), r.QualityScore(), r.Loss(),
-				float64(r.Avg().Milliseconds()), colo, status)
+			line := fmt.Sprintf("  %-22s  %7.1f   %9.2f  %10.2f  %6.1f%%  %-8s  %6s",
+				formatEndpoint(r.IP.String(), r.Port), r.QualityScore(),
+				float64(r.RTT().Milliseconds()), float64(r.Avg().Milliseconds()), r.Loss(), colo, status)
 			sb.WriteString(lineStyle.Render(line) + "\n")
 		}
 		sb.WriteRune('\n')
@@ -2744,7 +2755,7 @@ func (m AppModel) copyPhase1RawHealthyIPs() string {
 	if len(rawIPs) == 0 {
 		return "no raw healthy IPs to copy"
 	}
-	return copyAndSaveRawHealthyIPs(rawIPs)
+	return copyAndSaveRawHealthyIPs(m.liveResultPath, rawIPs)
 }
 
 // rawHealthyIPs returns unique healthy Phase 1 IPs in the same quality order
@@ -2767,10 +2778,10 @@ func rawHealthyIPs(results []*result.Result) []string {
 	return rawIPs
 }
 
-func copyAndSaveRawHealthyIPs(rawIPs []string) string {
+func copyAndSaveRawHealthyIPs(liveResultPath string, rawIPs []string) string {
 	text := strings.Join(rawIPs, "\n") + "\n"
 	clipErr := clipboardWriteAll(text)
-	_, fileErr := writeRawIPsBesideLiveResult(rawIPs)
+	path, fileErr := writeRawIPsBesideResultPath(liveResultPath, rawIPs)
 
 	parts := make([]string, 0, 2)
 	if clipErr == nil {
@@ -2779,9 +2790,9 @@ func copyAndSaveRawHealthyIPs(rawIPs []string) string {
 		parts = append(parts, fmt.Sprintf("raw healthy IP clipboard failed: %v", clipErr))
 	}
 	if fileErr == nil {
-		parts = append(parts, "saved raw IPs to healthy_ips_raw.txt")
+		parts = append(parts, "saved to "+path)
 	} else {
-		parts = append(parts, fmt.Sprintf("raw IP save failed: %v", fileErr))
+		parts = append(parts, fmt.Sprintf("failed to save raw IP file: %v", fileErr))
 	}
 	return strings.Join(parts, "; ")
 }

@@ -8,23 +8,25 @@ import (
 )
 
 // DefaultMaxPhase1AvgLatency is the default cutoff for Phase 1 top/export lists.
-// Results remain available in scan history even when they exceed this threshold.
+// It applies to TCP connect RTT when available, otherwise the legacy full probe
+// average. Results remain available in scan history even when they exceed it.
 const DefaultMaxPhase1AvgLatency = 800 * time.Millisecond
 
 // Result holds all measured statistics for a single Cloudflare IP.
 type Result struct {
-	IP          net.IP
-	Port        int
-	ProbeMode   string          // tcp | tls | http
-	Latencies   []time.Duration // per-try latencies; 0 = failed try
-	TLSOk       bool
-	WSOk        bool // WebSocket connection survived hold test
-	RequireWS   bool // true when WebSocket success is part of health criteria
-	HTTPStatus  int
-	Colo        string
-	Throughput  float64 // bytes/sec, 0 if not measured
-	SpeedTested bool    // true when a payload download check was attempted
-	Timestamp   time.Time
+	IP               net.IP
+	Port             int
+	ProbeMode        string          // tcp | tls | http
+	Latencies        []time.Duration // per-try full protocol probe durations; 0 = failed try
+	ConnectLatencies []time.Duration // per-try TCP connect durations; 0 = TCP connect failed or was not measured
+	TLSOk            bool
+	WSOk             bool // WebSocket connection survived hold test
+	RequireWS        bool // true when WebSocket success is part of health criteria
+	HTTPStatus       int
+	Colo             string
+	Throughput       float64 // bytes/sec, 0 if not measured
+	SpeedTested      bool    // true when a payload download check was attempted
+	Timestamp        time.Time
 }
 
 // Loss returns packet loss percentage (0–100).
@@ -41,11 +43,29 @@ func (r *Result) Loss() float64 {
 	return float64(failed) / float64(len(r.Latencies)) * 100
 }
 
-// Avg returns the mean of successful latency measurements.
-func (r *Result) Avg() time.Duration {
+// Avg returns the mean of successful full protocol probe durations. Depending
+// on ProbeMode, this includes TCP connect only (tcp), TCP+TLS handshake (tls),
+// or TCP+TLS+HTTP request through response headers (http).
+func (r *Result) Avg() time.Duration { return avgDurations(r.Latencies) }
+
+// ConnectAvg returns the mean of successful TCP connect measurements. It is the
+// closest available measurement to network RTT and intentionally excludes TLS,
+// HTTP response, and download/sample work.
+func (r *Result) ConnectAvg() time.Duration { return avgDurations(r.ConnectLatencies) }
+
+// RTT returns the preferred latency used for ranking: TCP connect latency when
+// available, with a safe fallback to the legacy full probe duration.
+func (r *Result) RTT() time.Duration {
+	if avg := r.ConnectAvg(); avg > 0 {
+		return avg
+	}
+	return r.Avg()
+}
+
+func avgDurations(values []time.Duration) time.Duration {
 	var sum time.Duration
 	var count int
-	for _, l := range r.Latencies {
+	for _, l := range values {
 		if l > 0 {
 			sum += l
 			count++
@@ -79,10 +99,23 @@ func (r *Result) Max() time.Duration {
 	return m
 }
 
-// Jitter returns the standard deviation of successful latencies.
-func (r *Result) Jitter() time.Duration {
+// Jitter returns the standard deviation of successful full probe durations.
+func (r *Result) Jitter() time.Duration { return jitterDurations(r.Latencies) }
+
+// ConnectJitter returns the standard deviation of successful TCP connect durations.
+func (r *Result) ConnectJitter() time.Duration { return jitterDurations(r.ConnectLatencies) }
+
+// RTTJitter returns TCP connect jitter when available, otherwise full probe jitter.
+func (r *Result) RTTJitter() time.Duration {
+	if r.ConnectAvg() > 0 {
+		return r.ConnectJitter()
+	}
+	return r.Jitter()
+}
+
+func jitterDurations(values []time.Duration) time.Duration {
 	var count int
-	for _, l := range r.Latencies {
+	for _, l := range values {
 		if l > 0 {
 			count++
 		}
@@ -90,9 +123,9 @@ func (r *Result) Jitter() time.Duration {
 	if count < 2 {
 		return 0
 	}
-	avg := float64(r.Avg())
+	avg := float64(avgDurations(values))
 	var variance float64
-	for _, l := range r.Latencies {
+	for _, l := range values {
 		if l > 0 {
 			diff := float64(l) - avg
 			variance += diff * diff
@@ -106,8 +139,8 @@ func (r *Result) Jitter() time.Duration {
 // Higher scores prefer stable, low-latency connections with better throughput
 // and successful protocol validation.
 func (r *Result) QualityScore() float64 {
-	avg := r.Avg()
-	jitter := r.Jitter()
+	avg := r.RTT()
+	jitter := r.RTTJitter()
 
 	lossScore := clampQuality(100 - r.Loss())
 	latencyScore := 0.0
@@ -185,13 +218,13 @@ func (r *Result) IsHealthy() bool {
 }
 
 // IsHealthyForPhase1 reports whether a result meets protocol health criteria
-// and the supplied average-latency cutoff. A non-positive cutoff disables the
-// latency filter.
+// and the supplied preferred-latency cutoff (TCP connect RTT with a full-probe
+// fallback). A non-positive cutoff disables the latency filter.
 func (r *Result) IsHealthyForPhase1(maxLatency time.Duration) bool {
 	if !r.IsHealthy() {
 		return false
 	}
-	return maxLatency <= 0 || r.Avg() <= maxLatency
+	return maxLatency <= 0 || r.RTT() <= maxLatency
 }
 
 // SortBy defines the available sort criteria.
@@ -210,7 +243,7 @@ func sortRank(r *Result) int {
 	if r.IsHealthy() {
 		return 0
 	}
-	if r.Avg() > 0 || r.Loss() < 100 {
+	if r.RTT() > 0 || r.Loss() < 100 {
 		return 1
 	}
 	return 2
@@ -274,27 +307,27 @@ func compareResults(a, b *Result, by SortBy) int {
 		if cmp := cmpFloatAsc(a.Loss(), b.Loss()); cmp != 0 {
 			return cmp
 		}
-		if cmp := cmpDuration(a.Avg(), b.Avg()); cmp != 0 {
+		if cmp := cmpDuration(a.RTT(), b.RTT()); cmp != 0 {
 			return cmp
 		}
-		if cmp := cmpDuration(a.Jitter(), b.Jitter()); cmp != 0 {
+		if cmp := cmpDuration(a.RTTJitter(), b.RTTJitter()); cmp != 0 {
 			return cmp
 		}
 	case SortByJitter:
-		if cmp := cmpDuration(a.Jitter(), b.Jitter()); cmp != 0 {
+		if cmp := cmpDuration(a.RTTJitter(), b.RTTJitter()); cmp != 0 {
 			return cmp
 		}
 		if cmp := cmpFloatAsc(a.Loss(), b.Loss()); cmp != 0 {
 			return cmp
 		}
-		if cmp := cmpDuration(a.Avg(), b.Avg()); cmp != 0 {
+		if cmp := cmpDuration(a.RTT(), b.RTT()); cmp != 0 {
 			return cmp
 		}
 	case SortByColo:
 		if cmp := cmpString(a.Colo, b.Colo); cmp != 0 {
 			return cmp
 		}
-		if cmp := cmpDuration(a.Avg(), b.Avg()); cmp != 0 {
+		if cmp := cmpDuration(a.RTT(), b.RTT()); cmp != 0 {
 			return cmp
 		}
 		if cmp := cmpFloatAsc(a.Loss(), b.Loss()); cmp != 0 {
@@ -304,7 +337,7 @@ func compareResults(a, b *Result, by SortBy) int {
 		if cmp := cmpFloatDesc(a.Throughput, b.Throughput); cmp != 0 {
 			return cmp
 		}
-		if cmp := cmpDuration(a.Avg(), b.Avg()); cmp != 0 {
+		if cmp := cmpDuration(a.RTT(), b.RTT()); cmp != 0 {
 			return cmp
 		}
 		if cmp := cmpFloatAsc(a.Loss(), b.Loss()); cmp != 0 {
@@ -317,23 +350,23 @@ func compareResults(a, b *Result, by SortBy) int {
 		if cmp := cmpFloatAsc(a.Loss(), b.Loss()); cmp != 0 {
 			return cmp
 		}
-		if cmp := cmpDuration(a.Jitter(), b.Jitter()); cmp != 0 {
+		if cmp := cmpDuration(a.RTTJitter(), b.RTTJitter()); cmp != 0 {
 			return cmp
 		}
-		if cmp := cmpDuration(a.Avg(), b.Avg()); cmp != 0 {
+		if cmp := cmpDuration(a.RTT(), b.RTT()); cmp != 0 {
 			return cmp
 		}
 		if cmp := cmpFloatDesc(a.Throughput, b.Throughput); cmp != 0 {
 			return cmp
 		}
 	default:
-		if cmp := cmpDuration(a.Avg(), b.Avg()); cmp != 0 {
+		if cmp := cmpDuration(a.RTT(), b.RTT()); cmp != 0 {
 			return cmp
 		}
 		if cmp := cmpFloatAsc(a.Loss(), b.Loss()); cmp != 0 {
 			return cmp
 		}
-		if cmp := cmpDuration(a.Jitter(), b.Jitter()); cmp != 0 {
+		if cmp := cmpDuration(a.RTTJitter(), b.RTTJitter()); cmp != 0 {
 			return cmp
 		}
 	}

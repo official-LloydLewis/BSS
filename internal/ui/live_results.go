@@ -151,12 +151,12 @@ func (w *LiveResultWriter) writeLocked() error {
 
 	healthy := len(w.phase1Rows)
 	sb.WriteString(fmt.Sprintf("=== Phase 1 — connectivity (%d healthy / %d probed) ===\n\n", healthy, w.phase1Probed))
-	sb.WriteString(fmt.Sprintf("  %-22s  %7s  %7s  %9s  %8s  %6s\n", "ENDPOINT", "SCORE", "LOSS", "AVG(ms)", "COLO", "STATUS"))
-	sb.WriteString("  " + strings.Repeat("─", 74) + "\n")
+	sb.WriteString(fmt.Sprintf("  %-22s  %7s  %9s  %10s  %7s  %8s  %6s\n", "ENDPOINT", "SCORE", "RTT(ms)", "PROBE(ms)", "LOSS", "COLO", "STATUS"))
+	sb.WriteString("  " + strings.Repeat("─", 98) + "\n")
 
 	rows := append([]*result.Result(nil), w.phase1Rows...)
 	sort.Slice(rows, func(i, j int) bool {
-		return rows[i].Avg() < rows[j].Avg()
+		return rows[i].RTT() < rows[j].RTT()
 	})
 	if len(rows) == 0 {
 		sb.WriteString("  (no healthy results yet)\n")
@@ -170,11 +170,12 @@ func (w *LiveResultWriter) writeLocked() error {
 			if !r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 				status = "fail"
 			}
-			sb.WriteString(fmt.Sprintf("  %-22s  %7.1f  %6.1f%%  %9.2f  %-8s  %s\n",
+			sb.WriteString(fmt.Sprintf("  %-22s  %7.1f  %9.2f  %10.2f  %6.1f%%  %-8s  %s\n",
 				formatEndpoint(r.IP.String(), r.Port),
 				r.QualityScore(),
-				r.Loss(),
+				float64(r.RTT().Milliseconds()),
 				float64(r.Avg().Milliseconds()),
+				r.Loss(),
 				colo,
 				status,
 			))

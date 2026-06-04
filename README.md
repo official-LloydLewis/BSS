@@ -16,9 +16,10 @@ Run `senpaiscanner` and you land in a short menu. Navigate with arrow keys and E
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│  ▶  Find Working IPs   paste a config and test CF IPs      │
-│     About                                                │
-│     Quit                                                 │
+│  ▶  Find Working IPs         paste a config and test CF IPs │
+│     V2ray Config Modifier    modify configs by IP or range  │
+│     About                                                   │
+│     Quit                                                    │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -162,6 +163,21 @@ The top Phase 1 candidates are tested through an embedded xray instance with you
 
 Endpoint export lines look like `104.16.72.162:443`. Raw export lines look like `104.16.72.162`, one unique IP per line.
 
+## V2ray Config Modifier
+
+The **V2ray Config Modifier** menu item ports the simple workflow from the v2ray-config-modifier web tool into BSS. It accepts multiline VMESS, VLESS, WireGuard, and Trojan share links and generates modified links without launching another binary.
+
+| Row | Action |
+|-----|--------|
+| **Config** | enter one or more base configs, one per line |
+| **Input Type** | choose IP Ranges, IP List, Configs List, or SNI Spoof |
+| **Input Data** | enter CIDRs, IPs, target configs, or a spoof `IP:port` endpoint |
+| **Generate Configs** | build the modified config list; CIDR generation is capped at 5,000 outputs |
+| **Copy result to clipboard** | copy the generated list when clipboard support is available |
+| **Save result to file** | save the list; the default path is `modified-configs.txt` |
+
+Press `Ctrl+S` or `Esc` to finish editing a multiline field. Generated results remain visible if clipboard access or file saving fails.
+
 ### About
 
 Version string and short project blurb; `Enter` / `q` / `Esc` back to the menu.
@@ -202,7 +218,7 @@ Place `ips.txt` next to the executable or in your current working directory befo
 Each selected port is probed for every IP. Testing 5 ports on 5,000 IPs means 25,000 probes in Phase 1 — lower Count or narrow the port list if needed.
 
 **What happened to Quick Scan, Custom Scan, Test IPs, and Discover Colos?**
-Those separate menu flows were removed to focus on one workflow: paste your config, find working endpoints, export results. The core probe engine is still used internally by **Find Working IPs**.
+Those separate scan flows were removed to focus the scanner on one workflow: paste your config, find working endpoints, export results. The core probe engine is still used internally by **Find Working IPs**.
 
 ---
 

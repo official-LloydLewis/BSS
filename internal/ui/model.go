@@ -12,6 +12,7 @@ import (
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -19,6 +20,7 @@ import (
 	"github.com/matinsenpai/senpaiscanner/internal/banner"
 	"github.com/matinsenpai/senpaiscanner/internal/config"
 	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
+	"github.com/matinsenpai/senpaiscanner/internal/modifier"
 	"github.com/matinsenpai/senpaiscanner/internal/result"
 	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
 )
@@ -251,6 +253,16 @@ type AppModel struct {
 	configColoBlock     string // code-configurable Phase 1 blocklist
 	liveResultPath      string
 
+	// v2ray config modifier
+	modifierRow      int
+	modifierType     modifier.InputType
+	modifierConfig   textarea.Model
+	modifierInput    textarea.Model
+	modifierSavePath textinput.Model
+	modifierEditing  bool
+	modifierSaving   bool
+	modifierResult   string
+
 	// shared
 	statusMsg string
 	version   string
@@ -263,16 +275,18 @@ type menuEntry struct {
 
 var menuEntries = []menuEntry{
 	{"Find Working IPs", "scan Cloudflare IPs — config optional"},
+	{"V2ray Config Modifier", "modify configs by IPs, ranges, or SNI spoof"},
 	{"About", ""},
 	{"Quit", ""},
 }
 
-const menuLabelWidth = 16
+const menuLabelWidth = 22
 
 const (
 	menuFindWorking = 0
-	menuAbout       = 1
-	menuQuit        = 2
+	menuModifier    = 1
+	menuAbout       = 2
+	menuQuit        = 3
 )
 
 var modes = []string{"tls", "tcp", "http"}
@@ -316,6 +330,24 @@ func NewApp(version string) AppModel {
 	cfgCustom.CharLimit = 10
 	cfgCustom.Width = 12
 	m.configCustomInput = cfgCustom
+
+	modifierConfig := textarea.New()
+	modifierConfig.Placeholder = "VLESS, VMESS, WireGuard, or Trojan configs (one per line)"
+	modifierConfig.SetWidth(80)
+	modifierConfig.SetHeight(5)
+	m.modifierConfig = modifierConfig
+
+	modifierInput := textarea.New()
+	modifierInput.Placeholder = "Each IP range on a new line"
+	modifierInput.SetWidth(80)
+	modifierInput.SetHeight(5)
+	m.modifierInput = modifierInput
+
+	modifierSavePath := textinput.New()
+	modifierSavePath.Placeholder = "modified-configs.txt"
+	modifierSavePath.SetValue("modified-configs.txt")
+	modifierSavePath.Width = 50
+	m.modifierSavePath = modifierSavePath
 
 	m.modeIdx = modeIndex(m.scanCfg.Mode)
 	m.buildFormInputs()
@@ -519,6 +551,8 @@ func (m AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleResultsKey(msg)
 	case PageColos, PageLiveColos:
 		return m.handleColosKey(msg)
+	case PageModifier:
+		return m.handleModifierKey(msg)
 	case PageAbout:
 		if msg.String() == "q" || msg.String() == "esc" || msg.String() == "enter" {
 			m.page = PageHome
@@ -584,6 +618,19 @@ func (m AppModel) selectMenuItem() (tea.Model, tea.Cmd) {
 		m.liveResultPath = ""
 		clearLiveResultWriter()
 		m.statusMsg = ""
+		return m, nil
+	case menuModifier:
+		m.page = PageModifier
+		m.modifierRow = 0
+		m.modifierType = modifier.IPRanges
+		m.modifierEditing = false
+		m.modifierSaving = false
+		m.modifierResult = ""
+		m.modifierConfig.SetValue("")
+		m.modifierInput.SetValue("")
+		m.modifierSavePath.SetValue("modified-configs.txt")
+		m.statusMsg = ""
+		m.updateModifierPlaceholder()
 		return m, nil
 	case menuAbout:
 		m.page = PageAbout
@@ -1165,6 +1212,18 @@ func (m AppModel) updateFormInputs(msg tea.Msg) (AppModel, tea.Cmd) {
 		}
 	}
 
+	if m.page == PageModifier && m.modifierEditing {
+		var cmd tea.Cmd
+		if m.modifierSaving {
+			m.modifierSavePath, cmd = m.modifierSavePath.Update(msg)
+		} else if m.modifierRow == 0 {
+			m.modifierConfig, cmd = m.modifierConfig.Update(msg)
+		} else if m.modifierRow == 2 {
+			m.modifierInput, cmd = m.modifierInput.Update(msg)
+		}
+		cmds = append(cmds, cmd)
+	}
+
 	if m.page == PageConfigOptional {
 		if m.configCustomMode {
 			var cmd tea.Cmd
@@ -1200,6 +1259,8 @@ func (m AppModel) View() string {
 		return m.viewLiveColos()
 	case PageAbout:
 		return m.viewAbout()
+	case PageModifier:
+		return m.viewModifier()
 	case PageScanWithConfig:
 		return m.viewScanWithConfig()
 	case PageConfigOptional:

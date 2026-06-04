@@ -12,6 +12,7 @@ const (
 	PageColos
 	PageLiveColos
 	PageAbout
+	PageModifier
 	PageScanWithConfig // setup: source, count, workers, timeout, ports
 	PageConfigOptional // optional config URL + Phase 2 top N
 	PageConfigSetup    // legacy setup (unused)

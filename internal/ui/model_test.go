@@ -19,11 +19,14 @@ import (
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func TestMenuOnlyShowsMainWorkflow(t *testing.T) {
-	if len(menuEntries) != 3 {
-		t.Fatalf("menu entries = %d, want 3", len(menuEntries))
+	if len(menuEntries) != 4 {
+		t.Fatalf("menu entries = %d, want 4", len(menuEntries))
 	}
 	if menuEntries[0].label != "Find Working IPs" {
 		t.Fatalf("first menu item = %q, want Find Working IPs", menuEntries[0].label)
+	}
+	if menuEntries[1].label != "V2ray Config Modifier" {
+		t.Fatalf("second menu item = %q, want V2ray Config Modifier", menuEntries[1].label)
 	}
 	for _, entry := range menuEntries {
 		for _, removed := range []string{"Quick Scan", "Custom Scan", "Test IPs", "Discover Colos"} {

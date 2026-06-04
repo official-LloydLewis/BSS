@@ -214,3 +214,120 @@ func TestSortBySpeedKeepsHealthyResultsAheadOfUntestedFailures(t *testing.T) {
 		t.Fatalf("first result after speed sort = %s, want 1.1.1.2", results[0].IP)
 	}
 }
+
+func TestQualityScoreOrdering(t *testing.T) {
+	base := Result{
+		IP:         net.ParseIP("1.1.1.1"),
+		Port:       443,
+		ProbeMode:  "http",
+		Latencies:  []time.Duration{100 * time.Millisecond, 100 * time.Millisecond, 100 * time.Millisecond, 100 * time.Millisecond},
+		Throughput: 256 * 1024,
+	}
+
+	tests := []struct {
+		name   string
+		better Result
+		worse  Result
+	}{
+		{
+			name:   "lower loss",
+			better: base,
+			worse:  withLatencies(base, 100*time.Millisecond, 100*time.Millisecond, 100*time.Millisecond, 0),
+		},
+		{
+			name:   "lower jitter",
+			better: base,
+			worse:  withLatencies(base, 50*time.Millisecond, 100*time.Millisecond, 150*time.Millisecond, 100*time.Millisecond),
+		},
+		{
+			name:   "lower latency",
+			better: base,
+			worse:  withLatencies(base, 200*time.Millisecond, 200*time.Millisecond, 200*time.Millisecond, 200*time.Millisecond),
+		},
+		{
+			name:   "higher throughput",
+			better: withThroughput(base, 1024*1024),
+			worse:  withThroughput(base, 64*1024),
+		},
+		{
+			name:   "successful protocol validation",
+			better: withValidation(base),
+			worse:  base,
+		},
+		{
+			name:   "required websocket success bonus",
+			better: withRequiredWebSocket(base, true),
+			worse:  withRequiredWebSocket(base, false),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, want := tt.better.QualityScore(), tt.worse.QualityScore(); got <= want {
+				t.Fatalf("better score = %.2f, worse score = %.2f", got, want)
+			}
+		})
+	}
+}
+
+func TestSortByQualityKeepsHealthyResultsFirst(t *testing.T) {
+	healthy := &Result{
+		IP:        net.ParseIP("1.1.1.1"),
+		Latencies: []time.Duration{10 * time.Second, 10 * time.Second, 0},
+	}
+	unhealthy := &Result{
+		IP:          net.ParseIP("1.1.1.2"),
+		ProbeMode:   "http",
+		Port:        443,
+		Latencies:   []time.Duration{10 * time.Millisecond, 0},
+		TLSOk:       true,
+		WSOk:        true,
+		RequireWS:   true,
+		HTTPStatus:  200,
+		Colo:        "FRA",
+		Throughput:  10 * 1024 * 1024,
+		SpeedTested: true,
+	}
+	if healthy.QualityScore() >= unhealthy.QualityScore() {
+		t.Fatalf("test setup requires unhealthy score %.2f to exceed healthy score %.2f", unhealthy.QualityScore(), healthy.QualityScore())
+	}
+
+	results := []*Result{unhealthy, healthy}
+	Sort(results, SortByQuality)
+	if results[0] != healthy {
+		t.Fatalf("healthy result should sort first, got %s", results[0].IP)
+	}
+}
+
+func TestTopNUsesQualityScore(t *testing.T) {
+	fast := &Result{IP: net.ParseIP("1.1.1.1"), Latencies: []time.Duration{40 * time.Millisecond}, Throughput: 0}
+	quality := &Result{IP: net.ParseIP("1.1.1.2"), Latencies: []time.Duration{80 * time.Millisecond}, Throughput: 2 * 1024 * 1024}
+
+	top := TopN([]*Result{fast, quality}, 1)
+	if len(top) != 1 || top[0] != quality {
+		t.Fatalf("TopN should choose higher quality result, got %+v", top)
+	}
+}
+
+func withLatencies(r Result, latencies ...time.Duration) Result {
+	r.Latencies = latencies
+	return r
+}
+
+func withThroughput(r Result, throughput float64) Result {
+	r.Throughput = throughput
+	return r
+}
+
+func withValidation(r Result) Result {
+	r.TLSOk = true
+	r.HTTPStatus = 200
+	r.Colo = "FRA"
+	return r
+}
+
+func withRequiredWebSocket(r Result, ok bool) Result {
+	r.RequireWS = true
+	r.WSOk = ok
+	return r
+}

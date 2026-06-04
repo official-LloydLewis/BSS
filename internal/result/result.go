@@ -98,6 +98,58 @@ func (r *Result) Jitter() time.Duration {
 	return time.Duration(math.Sqrt(variance))
 }
 
+// QualityScore returns a deterministic 0–100 score for ranking Phase 1 results.
+// Higher scores prefer stable, low-latency connections with better throughput
+// and successful protocol validation.
+func (r *Result) QualityScore() float64 {
+	avg := r.Avg()
+	jitter := r.Jitter()
+
+	lossScore := clampQuality(100 - r.Loss())
+	latencyScore := 0.0
+	jitterScore := 0.0
+	if avg > 0 {
+		latencyScore = lowerIsBetterQuality(float64(avg)/float64(time.Millisecond), 100)
+		jitterScore = lowerIsBetterQuality(float64(jitter)/float64(time.Millisecond), 50)
+	}
+
+	throughput := math.Max(r.Throughput, 0)
+	throughputScore := clampQuality(100 * (1 - math.Exp(-throughput/(512*1024))))
+
+	score := lossScore*0.35 + latencyScore*0.25 + jitterScore*0.15 + throughputScore*0.15
+	if r.TLSOk {
+		score += 2
+	}
+	if r.HTTPStatus >= 200 && r.HTTPStatus < 400 {
+		score += 2
+	}
+	if r.Colo != "" {
+		score++
+	}
+	if r.RequireWS && r.WSOk {
+		score += 5
+	}
+	return clampQuality(score)
+}
+
+func lowerIsBetterQuality(value, scale float64) float64 {
+	if value < 0 {
+		value = 0
+	}
+	return 100 / (1 + value/scale)
+}
+
+func clampQuality(score float64) float64 {
+	switch {
+	case math.IsNaN(score), score < 0:
+		return 0
+	case score > 100:
+		return 100
+	default:
+		return score
+	}
+}
+
 // IsHealthy returns true only when the probe mode's success criteria are met.
 // A failed try must record latency 0; timeouts must never count as success.
 func (r *Result) IsHealthy() bool {
@@ -137,6 +189,7 @@ const (
 	SortByJitter
 	SortByColo
 	SortBySpeed
+	SortByQuality
 )
 
 func sortRank(r *Result) int {
@@ -243,6 +296,22 @@ func compareResults(a, b *Result, by SortBy) int {
 		if cmp := cmpFloatAsc(a.Loss(), b.Loss()); cmp != 0 {
 			return cmp
 		}
+	case SortByQuality:
+		if cmp := cmpFloatDesc(a.QualityScore(), b.QualityScore()); cmp != 0 {
+			return cmp
+		}
+		if cmp := cmpFloatAsc(a.Loss(), b.Loss()); cmp != 0 {
+			return cmp
+		}
+		if cmp := cmpDuration(a.Jitter(), b.Jitter()); cmp != 0 {
+			return cmp
+		}
+		if cmp := cmpDuration(a.Avg(), b.Avg()); cmp != 0 {
+			return cmp
+		}
+		if cmp := cmpFloatDesc(a.Throughput, b.Throughput); cmp != 0 {
+			return cmp
+		}
 	default:
 		if cmp := cmpDuration(a.Avg(), b.Avg()); cmp != 0 {
 			return cmp
@@ -274,7 +343,7 @@ func Sort(results []*Result, by SortBy) {
 	})
 }
 
-// TopN returns the n best results by Avg latency (ignoring unhealthy IPs).
+// TopN returns the n best healthy results by quality score.
 func TopN(results []*Result, n int) []*Result {
 	var healthy []*Result
 	for _, r := range results {
@@ -282,7 +351,7 @@ func TopN(results []*Result, n int) []*Result {
 			healthy = append(healthy, r)
 		}
 	}
-	Sort(healthy, SortByAvg)
+	Sort(healthy, SortByQuality)
 	if n > 0 && n < len(healthy) {
 		return healthy[:n]
 	}

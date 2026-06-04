@@ -9,13 +9,17 @@ import (
 	"strings"
 )
 
-// VLESSConfig holds parsed parameters from a VLESS share URL.
+// VLESSConfig holds parsed parameters used by xray validation.
+// Protocol is "vless" by default and may be "trojan" for configs returned by ParseProxyURL.
 type VLESSConfig struct {
+	Protocol string
+
 	UUID       string
 	Address    string
 	Port       int
 	Encryption string
 	Flow       string
+	Password   string // Trojan only
 
 	// Transport
 	Network     string // ws, grpc, xhttp, tcp
@@ -34,6 +38,41 @@ type VLESSConfig struct {
 
 	// Metadata
 	Remark string
+}
+
+// ParseProxyURL auto-detects a supported proxy share URL and returns the
+// common configuration shape used by the validation runner.
+func ParseProxyURL(raw string) (*VLESSConfig, error) {
+	raw = strings.TrimSpace(raw)
+	switch {
+	case strings.HasPrefix(raw, "vless://"):
+		return ParseVLESS(raw)
+	case strings.HasPrefix(raw, "trojan://"):
+		cfg, err := ParseTrojan(raw)
+		if err != nil {
+			return nil, err
+		}
+		return &VLESSConfig{
+			Protocol:    "trojan",
+			Password:    cfg.Password,
+			Address:     cfg.Address,
+			Port:        cfg.Port,
+			Network:     cfg.Network,
+			Path:        cfg.Path,
+			Host:        cfg.Host,
+			ServiceName: cfg.ServiceName,
+			Mode:        cfg.Mode,
+			Authority:   cfg.Authority,
+			Security:    cfg.Security,
+			SNI:         cfg.SNI,
+			Fingerprint: cfg.Fingerprint,
+			ALPN:        cfg.ALPN,
+			Insecure:    cfg.Insecure,
+			Remark:      cfg.Remark,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported URL scheme — must start with vless:// or trojan://")
+	}
 }
 
 // ParseVLESS parses a vless:// share URL into a VLESSConfig.
@@ -84,6 +123,7 @@ func ParseVLESS(raw string) (*VLESSConfig, error) {
 	}
 
 	cfg := &VLESSConfig{
+		Protocol:    "vless",
 		UUID:        uuid,
 		Address:     host,
 		Port:        port,

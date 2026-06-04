@@ -249,3 +249,32 @@ func TestGenericScanCopyDoesNotExportHealthyIPs(t *testing.T) {
 		t.Fatalf("generic copy message = %q", got)
 	}
 }
+
+func TestRawIPsFromEndpointsPreservesQualityOrderAndDeduplicates(t *testing.T) {
+	got := rawIPsFromEndpoints([]string{
+		"104.18.1.2:443",
+		"104.18.1.1:8443",
+		"104.18.1.2:2053",
+		"104.18.1.3",
+	})
+	want := []string{"104.18.1.2", "104.18.1.1", "104.18.1.3"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("raw IPs = %v, want %v", got, want)
+	}
+}
+
+func TestRawIPOutputFormat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "healthy_ips_raw.txt")
+	raw := rawIPsFromEndpoints([]string{"104.18.1.2:443", "104.18.1.1:8443", "104.18.1.2:2053"})
+	if err := writeIPsFile(path, raw); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(b), "104.18.1.2\n104.18.1.1\n"; got != want {
+		t.Fatalf("raw IP output = %q, want %q", got, want)
+	}
+}

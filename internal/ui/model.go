@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -991,20 +992,57 @@ func copyAndSaveIPs(ips []string) string {
 	text := strings.Join(ips, "\n") + "\n"
 	clipErr := clipboardWriteAll(text)
 	path, fileErr := writeIPsBesideExecutable(ips)
+	rawIPs := rawIPsFromEndpoints(ips)
+	rawPath, rawErr := writeNamedIPsBesideExecutable("healthy_ips_raw.txt", rawIPs)
 
-	switch {
-	case clipErr == nil && fileErr == nil:
-		return fmt.Sprintf("copied %d working endpoints; saved to %s", len(ips), path)
-	case clipErr != nil && fileErr == nil:
-		return fmt.Sprintf("clipboard failed; saved %d working endpoints to %s", len(ips), path)
-	case clipErr == nil && fileErr != nil:
-		return fmt.Sprintf("copied %d working endpoints; save failed: %v", len(ips), fileErr)
-	default:
-		return fmt.Sprintf("copy failed: %v; save failed: %v", clipErr, fileErr)
+	parts := make([]string, 0, 3)
+	if clipErr == nil {
+		parts = append(parts, fmt.Sprintf("copied %d working endpoints", len(ips)))
+	} else {
+		parts = append(parts, fmt.Sprintf("clipboard failed: %v", clipErr))
 	}
+	if fileErr == nil {
+		parts = append(parts, "saved endpoints to "+path)
+	} else {
+		parts = append(parts, fmt.Sprintf("endpoint save failed: %v", fileErr))
+	}
+	if rawErr == nil {
+		parts = append(parts, "raw IPs saved to "+rawPath)
+	} else {
+		parts = append(parts, fmt.Sprintf("raw IP save failed: %v", rawErr))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func rawIPsFromEndpoints(endpoints []string) []string {
+	seen := make(map[string]struct{})
+	raw := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		ip := endpoint
+		if net.ParseIP(endpoint) != nil {
+			ip = endpoint
+		} else if idx := strings.LastIndex(endpoint, ":"); idx > 0 {
+			if _, err := strconv.Atoi(endpoint[idx+1:]); err == nil {
+				ip = strings.Trim(endpoint[:idx], "[]")
+			}
+		}
+		if ip == "" {
+			continue
+		}
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		raw = append(raw, ip)
+	}
+	return raw
 }
 
 func writeIPsBesideExecutable(ips []string) (string, error) {
+	return writeNamedIPsBesideExecutable("ips.txt", ips)
+}
+
+func writeNamedIPsBesideExecutable(name string, ips []string) (string, error) {
 	exe, err := os.Executable()
 	dir := ""
 	if err == nil {
@@ -1016,7 +1054,7 @@ func writeIPsBesideExecutable(ips []string) (string, error) {
 			dir = "."
 		}
 	}
-	path := filepath.Join(dir, "ips.txt")
+	path := filepath.Join(dir, name)
 	if err := writeIPsFile(path, ips); err == nil {
 		return path, nil
 	}
@@ -1025,7 +1063,7 @@ func writeIPsBesideExecutable(ips []string) (string, error) {
 	if wdErr != nil {
 		return path, wdErr
 	}
-	fallback := filepath.Join(wd, "ips.txt")
+	fallback := filepath.Join(wd, name)
 	if fallback == path {
 		err := writeIPsFile(fallback, ips)
 		return fallback, err
@@ -1463,7 +1501,7 @@ func (m AppModel) viewResults() string {
 	total := len(m.scanResults)
 	healthy := 0
 	for _, r := range m.scanResults {
-		if r.IsHealthy() {
+		if r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 			healthy++
 		}
 	}
@@ -2579,18 +2617,19 @@ func (m AppModel) viewConfigPhase1() string {
 
 	healthy := 0
 	for _, r := range m.configPhase1Results {
-		if r.IsHealthy() {
+		if r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 			healthy++
 		}
 	}
 
 	targetStr := fmt.Sprintf("%d", m.configPhase1Total)
-	sb.WriteString(fmt.Sprintf("  %s  tested: %s  candidates: %s  target: %s\n\n",
+	sb.WriteString(fmt.Sprintf("  %s  tested: %s  candidates: %s  target: %s\n",
 		icon,
 		styleAccent.Render(fmt.Sprintf("%d", len(m.configPhase1Results))),
 		styleGood.Render(fmt.Sprintf("%d", healthy)),
 		styleDim.Render(targetStr),
 	))
+	sb.WriteString(styleDim.Render(fmt.Sprintf("  max latency: %s", result.DefaultMaxPhase1AvgLatency)) + "\n\n")
 	if !m.configPhase1Done {
 		sb.WriteString(fmt.Sprintf("  %s  %s  ports: %s\n\n",
 			styleAccent.Render(scanPulse(m.bannerFrame)),
@@ -2657,6 +2696,9 @@ func (m AppModel) viewConfigPhase1() string {
 		sb.WriteRune('\n')
 	}
 
+	if m.statusMsg != "" {
+		sb.WriteString(styleGood.Render("  "+m.statusMsg) + "\n")
+	}
 	if m.configPhase1Done && m.configPhase1Only {
 		sb.WriteString(styleHint.Render("  c copy healthy endpoints   q/esc back") + "\n")
 	} else {

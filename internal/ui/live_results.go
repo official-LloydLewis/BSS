@@ -92,7 +92,7 @@ func (w *LiveResultWriter) AddPhase1(r *result.Result) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.phase1Probed++
-	if r.IsHealthy() {
+	if r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 		w.phase1Rows = append(w.phase1Rows, r)
 	}
 	_ = w.writeLocked()
@@ -167,7 +167,7 @@ func (w *LiveResultWriter) writeLocked() error {
 				colo = "—"
 			}
 			status := "healthy"
-			if !r.IsHealthy() {
+			if !r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 				status = "fail"
 			}
 			sb.WriteString(fmt.Sprintf("  %-22s  %7.1f  %6.1f%%  %9.2f  %-8s  %s\n",

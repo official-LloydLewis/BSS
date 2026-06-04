@@ -155,7 +155,7 @@ func runScan(cfg ScanConfig, scanID int64) {
 		}
 		// Only healthy IPs go to the output file; writing every scanned IP
 		// would flood the file with thousands of failed probes.
-		if writer != nil && r.IsHealthy() {
+		if writer != nil && r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 			if err := writer.Write(r); err != nil {
 				sendError(scanID, fmt.Sprintf("Output write failed: %v", err))
 			}
@@ -414,7 +414,7 @@ func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports 
 	}
 
 	maybeEnqueueNeighbors := func(r *result.Result) {
-		if !neighbor.enabled || !r.IsHealthy() || len(neighbor.nets) == 0 {
+		if !neighbor.enabled || !r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) || len(neighbor.nets) == 0 {
 			return
 		}
 

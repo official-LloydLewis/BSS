@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// DefaultMaxPhase1AvgLatency is the default cutoff for Phase 1 top/export lists.
+// Results remain available in scan history even when they exceed this threshold.
+const DefaultMaxPhase1AvgLatency = 800 * time.Millisecond
+
 // Result holds all measured statistics for a single Cloudflare IP.
 type Result struct {
 	IP          net.IP
@@ -180,6 +184,16 @@ func (r *Result) IsHealthy() bool {
 	}
 }
 
+// IsHealthyForPhase1 reports whether a result meets protocol health criteria
+// and the supplied average-latency cutoff. A non-positive cutoff disables the
+// latency filter.
+func (r *Result) IsHealthyForPhase1(maxLatency time.Duration) bool {
+	if !r.IsHealthy() {
+		return false
+	}
+	return maxLatency <= 0 || r.Avg() <= maxLatency
+}
+
 // SortBy defines the available sort criteria.
 type SortBy int
 
@@ -345,9 +359,15 @@ func Sort(results []*Result, by SortBy) {
 
 // TopN returns the n best healthy results by quality score.
 func TopN(results []*Result, n int) []*Result {
+	return TopNWithMaxLatency(results, n, DefaultMaxPhase1AvgLatency)
+}
+
+// TopNWithMaxLatency returns the n best healthy results by quality score using
+// the supplied Phase 1 average-latency cutoff.
+func TopNWithMaxLatency(results []*Result, n int, maxLatency time.Duration) []*Result {
 	var healthy []*Result
 	for _, r := range results {
-		if r.IsHealthy() {
+		if r.IsHealthyForPhase1(maxLatency) {
 			healthy = append(healthy, r)
 		}
 	}

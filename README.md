@@ -1,4 +1,4 @@
-# SenPai Scanner
+# BSS (Better Senpai Scanner)
 
 [![CI](https://github.com/matinsenpai/senpaiscanner/actions/workflows/ci.yml/badge.svg)](https://github.com/matinsenpai/senpaiscanner/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/matinsenpai/senpaiscanner?style=flat-square)](https://github.com/matinsenpai/senpaiscanner/releases/latest)
@@ -27,7 +27,7 @@ Run `senpaiscanner` and you land in a short menu. Navigate with arrow keys and E
 1. **Phase 1 — Connectivity scan** probes candidate Cloudflare IPs using settings derived from your config URL (SNI, host, WebSocket path, port). It checks trace reachability and, for WebSocket configs, whether a WS-style TLS connection survives DPI.
 2. **Phase 2 — xray validation** launches an embedded xray instance and tests the best Phase 1 hits end-to-end through your actual VLESS/Trojan config. Results show endpoint, transport type, download speed, latency (TTFB), and pass/fail status.
 
-When Phase 2 finishes, press **`c`** to copy working `IP:port` endpoints to the clipboard and save them to `ips.txt` next to the binary (or current working directory).
+When Phase 2 finishes, press **`c`** to copy working `IP:port` endpoints to the clipboard and save them to `ips.txt` next to the binary (or current working directory). A unique raw-IP companion list is also saved to `healthy_ips_raw.txt`.
 
 ---
 
@@ -123,7 +123,7 @@ Press **Enter** on the last row to continue to the optional config step.
 
 **Enter** with an empty config field starts a connectivity-only scan. Paste a URL, set **Top N**, then **Enter** again to run full validation.
 
-**Live results file:** every scan writes (and keeps updating) `SenPaiScannerResult-YYYYMMDD-HHMMSS.txt` next to the binary or in the working directory. Open it in any editor while the scan runs to watch results arrive.
+**Live results file:** every scan writes (and keeps updating) `BSSResult-YYYYMMDD-HHMMSS.txt` next to the binary or in the working directory. Open it in any editor while the scan runs to watch results arrive.
 
 ### Setup details
 
@@ -136,6 +136,8 @@ Press **Enter** on the last row to continue to the optional config step.
 ### Phase 1 — Finding reachable IPs
 
 Without a config URL, Phase 1 uses a standard Cloudflare HTTP probe (`speed.cloudflare.com`, 64 KiB sample). With a config URL, probes use SNI/host/path from your link and require WebSocket success when `type=ws`.
+
+Phase 1 result tables include a **SCORE** column: a quality score that favors lower loss, jitter, and latency, higher throughput, and successful protocol validation. By default, endpoints above 800ms average latency remain visible in scan history but are excluded from top, healthy-export, and Phase 2 candidate lists.
 
 Press `q` / `Esc` to cancel and return to the menu.
 
@@ -153,10 +155,10 @@ The top Phase 1 candidates are tested through an embedded xray instance with you
 
 | Key | Action |
 |-----|--------|
-| `c` | copy working endpoints to clipboard **and** save to `ips.txt` |
+| `c` | copy working endpoints to clipboard, save them to `ips.txt`, and save unique raw IPs to `healthy_ips_raw.txt` |
 | `q` / `Esc` | return to the main menu |
 
-Exported lines look like `104.16.72.162:443` — ready to paste into client configs or DNS/IP lists.
+Endpoint export lines look like `104.16.72.162:443`. Raw export lines look like `104.16.72.162`, one unique IP per line.
 
 ### About
 
@@ -168,7 +170,7 @@ Version string and short project blurb; `Enter` / `q` / `Esc` back to the menu.
 
 **Start with defaults.** 5,000 random IPs, 50 workers, 5s timeout, and the config port are a good baseline on lossy or filtered lines.
 
-**Use From File after a partial run.** Copy working endpoints with `c`, edit `ips.txt`, then re-run with **Source → From File** to validate only your shortlist on more ports.
+**Use From File after a partial run.** Copy working endpoints with `c`, then use or edit `healthy_ips_raw.txt` as a raw-IP shortlist for another run on more ports.
 
 **Try multiple ports.** Cloudflare CDN ports (443, 8443, 2053, …) behave differently under DPI. Multi-port selection lets Phase 1 find the best `IP:port` pair before xray validation.
 
@@ -183,10 +185,10 @@ Version string and short project blurb; `Enter` / `q` / `Esc` back to the menu.
 ## FAQ
 
 **Why doesn't it just run a ping?**
-Cloudflare drops ICMP on their edge IPs. SenPai Scanner validates HTTP/TLS behaviour and, for proxy configs, runs traffic through xray — closer to real VLESS/Trojan usage than ping or bare TCP.
+Cloudflare drops ICMP on their edge IPs. BSS (Better Senpai Scanner) validates HTTP/TLS behaviour and, for proxy configs, runs traffic through xray — closer to real VLESS/Trojan usage than ping or bare TCP.
 
 **How is this different from warp-plus?**
-SenPai Scanner does not run a permanent proxy. It finds and validates Cloudflare IPs for **your** xray config and exports `IP:port` lists you can plug into Sing-Box, v2rayN, etc.
+BSS (Better Senpai Scanner) does not run a permanent proxy. It finds and validates Cloudflare IPs for **your** xray config and exports `IP:port` lists you can plug into Sing-Box, v2rayN, etc.
 
 **Where do the IP ranges come from?**
 Embedded from Cloudflare's official published lists (`cloudflare.com/ips-v4`, `cloudflare.com/ips-v6`). The binary ships with a snapshot; ranges rarely change.

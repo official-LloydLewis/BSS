@@ -119,3 +119,25 @@ func TestParseShareSummaryXHTTPUsesConfigType(t *testing.T) {
 	assertEqual(t, "Host", summary.Host, "test.example.org")
 	assertEqual(t, "Path", summary.Path, "/download")
 }
+
+func TestParseProxyURL(t *testing.T) {
+	vless, err := ParseProxyURL("  vless://12345678-1234-1234-1234-123456789abc@example.com:443?encryption=none&security=tls&type=ws#test  ")
+	if err != nil {
+		t.Fatalf("ParseProxyURL VLESS failed: %v", err)
+	}
+	assertEqual(t, "VLESS protocol", vless.Protocol, "vless")
+	assertEqual(t, "VLESS address", vless.Address, "example.com")
+
+	trojan, err := ParseProxyURL("trojan://secret@example.com:443?security=tls&type=ws&host=example.com&path=%2Fproxy#test")
+	if err != nil {
+		t.Fatalf("ParseProxyURL Trojan failed: %v", err)
+	}
+	assertEqual(t, "Trojan protocol", trojan.Protocol, "trojan")
+	assertEqual(t, "Trojan password", trojan.Password, "secret")
+	assertEqual(t, "Trojan address", trojan.Address, "example.com")
+	assertEqual(t, "Trojan path", trojan.Path, "/proxy")
+
+	if _, err := ParseProxyURL("vmess://unsupported"); err == nil {
+		t.Fatal("expected unsupported proxy URL to fail")
+	}
+}

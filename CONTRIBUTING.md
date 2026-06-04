@@ -1,6 +1,6 @@
-# Contributing to SenPai Scanner
+# Contributing to BSS (Better Senpai Scanner)
 
-Thank you for taking the time to improve SenPai Scanner. This project exists so that people on slow or restricted networks can find Cloudflare IPs that **actually work with their own config** — without reading docs, memorizing flags, or babysitting a terminal.
+Thank you for taking the time to improve BSS (Better Senpai Scanner). This project exists so that people on slow or restricted networks can find Cloudflare IPs that **actually work with their own config** — without reading docs, memorizing flags, or babysitting a terminal.
 
 Every contribution should move us closer to that goal.
 
@@ -17,7 +17,7 @@ These priorities are ordered on purpose. When they conflict, resolve them from t
 | **Clean code** | Small functions, honest names, minimal scope. Match the style of the file you are editing. |
 | **Performance** | Scans must stay fast on weak hardware and bad networks. Do not block the UI thread; measure before adding work per IP. |
 
-SenPai Scanner is **not** a general-purpose network lab. Resist scope creep: CLI flags, export formats, and power-user toggles only belong here when they serve the main workflow.
+BSS (Better Senpai Scanner) is **not** a general-purpose network lab. Resist scope creep: CLI flags, export formats, and power-user toggles only belong here when they serve the main workflow.
 
 ---
 
@@ -186,4 +186,4 @@ By contributing, you agree that your contributions will be licensed under the [M
 
 Open a [GitHub Discussion](https://github.com/matinsenpai/senpaiscanner/discussions) or issue if you are unsure whether an idea fits. A quick “is this in scope?” question saves everyone time.
 
-Thank you for helping keep SenPai Scanner fast, simple, and reliable for the people who actually need it.
+Thank you for helping keep BSS (Better Senpai Scanner) fast, simple, and reliable for the people who actually need it.

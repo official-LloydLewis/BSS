@@ -48,6 +48,26 @@ func BuildXrayConfig(cfg *VLESSConfig, socksPort int) ([]byte, error) {
 }
 
 func buildOutbound(cfg *VLESSConfig) map[string]interface{} {
+	if cfg.Protocol == "trojan" {
+		return buildTrojanOutbound(&TrojanConfig{
+			Password:    cfg.Password,
+			Address:     cfg.Address,
+			Port:        cfg.Port,
+			Network:     cfg.Network,
+			Path:        cfg.Path,
+			Host:        cfg.Host,
+			ServiceName: cfg.ServiceName,
+			Mode:        cfg.Mode,
+			Authority:   cfg.Authority,
+			Security:    cfg.Security,
+			SNI:         cfg.SNI,
+			Fingerprint: cfg.Fingerprint,
+			ALPN:        cfg.ALPN,
+			Insecure:    cfg.Insecure,
+			Remark:      cfg.Remark,
+		})
+	}
+
 	users := []map[string]interface{}{
 		{
 			"id":         cfg.UUID,

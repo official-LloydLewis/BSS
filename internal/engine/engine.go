@@ -93,7 +93,7 @@ func (e *Engine) Run(ctx context.Context, src <-chan net.IP, fn ResultFunc) {
 
 				r := prober.Probe(ctx, ip, e.cfg.ProbeConfig)
 				e.stats.Tested.Add(1)
-				if r.IsHealthy() {
+				if r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 					e.stats.Healthy.Add(1)
 				} else {
 					e.stats.Failed.Add(1)

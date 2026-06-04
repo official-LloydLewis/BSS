@@ -34,6 +34,14 @@ func TestMenuOnlyShowsMainWorkflow(t *testing.T) {
 	}
 }
 
+func TestAboutUsesBSSBranding(t *testing.T) {
+	m := NewApp("test")
+	view := ansiRE.ReplaceAllString(m.viewAbout(), "")
+	if !strings.Contains(view, "BSS (Better Senpai Scanner)") {
+		t.Fatalf("About view missing BSS branding: %q", view)
+	}
+}
+
 func TestResolvePhase1OptionsUsesRandomCloudflareDefaults(t *testing.T) {
 	m := NewApp("test")
 	m.configURL = "vless://12345678-1234-1234-1234-123456789abc@example.com:443?encryption=none&security=tls&type=ws&host=example.com&path=%2F#test"
@@ -118,7 +126,7 @@ func TestConfigPhase1TableColumnsStayAligned(t *testing.T) {
 	if rowLine == "" {
 		t.Fatal("missing Phase 1 table row")
 	}
-	for _, col := range []string{"LOSS", "AVG(ms)", "STATUS"} {
+	for _, col := range []string{"SCORE", "LOSS", "AVG(ms)", "STATUS"} {
 		if !strings.Contains(headerLine, col) {
 			t.Fatalf("header missing %s: %q", col, headerLine)
 		}
@@ -238,5 +246,34 @@ func TestGenericScanCopyDoesNotExportHealthyIPs(t *testing.T) {
 	got := next.(AppModel).statusMsg
 	if !strings.Contains(got, "Find Working IPs") {
 		t.Fatalf("generic copy message = %q", got)
+	}
+}
+
+func TestRawIPsFromEndpointsPreservesQualityOrderAndDeduplicates(t *testing.T) {
+	got := rawIPsFromEndpoints([]string{
+		"104.18.1.2:443",
+		"104.18.1.1:8443",
+		"104.18.1.2:2053",
+		"104.18.1.3",
+	})
+	want := []string{"104.18.1.2", "104.18.1.1", "104.18.1.3"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("raw IPs = %v, want %v", got, want)
+	}
+}
+
+func TestRawIPOutputFormat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "healthy_ips_raw.txt")
+	raw := rawIPsFromEndpoints([]string{"104.18.1.2:443", "104.18.1.1:8443", "104.18.1.2:2053"})
+	if err := writeIPsFile(path, raw); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(b), "104.18.1.2\n104.18.1.1\n"; got != want {
+		t.Fatalf("raw IP output = %q, want %q", got, want)
 	}
 }

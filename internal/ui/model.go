@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -914,7 +915,7 @@ var clipboardWriteAll = clipboard.WriteAll
 // copyHealthyIPsToClipboard writes one IP per line to the system clipboard
 // and returns a short status message to display to the user.
 func (m AppModel) copyHealthyIPsToClipboard() string {
-	top := result.TopN(m.scanResults, 0) // all healthy IPs, sorted by avg
+	top := result.TopN(m.scanResults, 0) // all healthy IPs, sorted by quality score
 	if len(top) == 0 {
 		return "no healthy IPs to copy"
 	}
@@ -991,20 +992,57 @@ func copyAndSaveIPs(ips []string) string {
 	text := strings.Join(ips, "\n") + "\n"
 	clipErr := clipboardWriteAll(text)
 	path, fileErr := writeIPsBesideExecutable(ips)
+	rawIPs := rawIPsFromEndpoints(ips)
+	rawPath, rawErr := writeNamedIPsBesideExecutable("healthy_ips_raw.txt", rawIPs)
 
-	switch {
-	case clipErr == nil && fileErr == nil:
-		return fmt.Sprintf("copied %d working endpoints; saved to %s", len(ips), path)
-	case clipErr != nil && fileErr == nil:
-		return fmt.Sprintf("clipboard failed; saved %d working endpoints to %s", len(ips), path)
-	case clipErr == nil && fileErr != nil:
-		return fmt.Sprintf("copied %d working endpoints; save failed: %v", len(ips), fileErr)
-	default:
-		return fmt.Sprintf("copy failed: %v; save failed: %v", clipErr, fileErr)
+	parts := make([]string, 0, 3)
+	if clipErr == nil {
+		parts = append(parts, fmt.Sprintf("copied %d working endpoints", len(ips)))
+	} else {
+		parts = append(parts, fmt.Sprintf("clipboard failed: %v", clipErr))
 	}
+	if fileErr == nil {
+		parts = append(parts, "saved endpoints to "+path)
+	} else {
+		parts = append(parts, fmt.Sprintf("endpoint save failed: %v", fileErr))
+	}
+	if rawErr == nil {
+		parts = append(parts, "raw IPs saved to "+rawPath)
+	} else {
+		parts = append(parts, fmt.Sprintf("raw IP save failed: %v", rawErr))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func rawIPsFromEndpoints(endpoints []string) []string {
+	seen := make(map[string]struct{})
+	raw := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		ip := endpoint
+		if net.ParseIP(endpoint) != nil {
+			ip = endpoint
+		} else if idx := strings.LastIndex(endpoint, ":"); idx > 0 {
+			if _, err := strconv.Atoi(endpoint[idx+1:]); err == nil {
+				ip = strings.Trim(endpoint[:idx], "[]")
+			}
+		}
+		if ip == "" {
+			continue
+		}
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		raw = append(raw, ip)
+	}
+	return raw
 }
 
 func writeIPsBesideExecutable(ips []string) (string, error) {
+	return writeNamedIPsBesideExecutable("ips.txt", ips)
+}
+
+func writeNamedIPsBesideExecutable(name string, ips []string) (string, error) {
 	exe, err := os.Executable()
 	dir := ""
 	if err == nil {
@@ -1016,7 +1054,7 @@ func writeIPsBesideExecutable(ips []string) (string, error) {
 			dir = "."
 		}
 	}
-	path := filepath.Join(dir, "ips.txt")
+	path := filepath.Join(dir, name)
 	if err := writeIPsFile(path, ips); err == nil {
 		return path, nil
 	}
@@ -1025,7 +1063,7 @@ func writeIPsBesideExecutable(ips []string) (string, error) {
 	if wdErr != nil {
 		return path, wdErr
 	}
-	fallback := filepath.Join(wd, "ips.txt")
+	fallback := filepath.Join(wd, name)
 	if fallback == path {
 		err := writeIPsFile(fallback, ips)
 		return fallback, err
@@ -1370,9 +1408,9 @@ func (m AppModel) viewLiveScan() string {
 	))
 
 	// Table header
-	hdr := fmt.Sprintf("  %-18s  %7s  %9s  %8s  %9s  %5s  %-6s",
-		"IP", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
-	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 72))))
+	hdr := fmt.Sprintf("  %-18s  %7s  %7s  %9s  %8s  %9s  %5s  %-6s",
+		"IP", "SCORE", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
+	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 81))))
 
 	maxRows := m.height - 14
 	if maxRows < 3 {
@@ -1392,8 +1430,8 @@ func (m AppModel) viewLiveScan() string {
 		if colo == "" {
 			colo = "—"
 		}
-		line := fmt.Sprintf("  %-18s  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
-			r.IP.String(), r.Loss(),
+		line := fmt.Sprintf("  %-18s  %7.1f  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
+			r.IP.String(), r.QualityScore(), r.Loss(),
 			float64(r.Avg().Milliseconds()),
 			float64(r.Jitter().Milliseconds()),
 			r.Throughput/1024,
@@ -1436,9 +1474,9 @@ func (m AppModel) viewResults() string {
 	if len(top) == 0 {
 		sb.WriteString(styleWarn.Render("  No healthy IPs found. Try raising timeout, lowering workers, or using a different SNI.\n"))
 	} else {
-		hdr := fmt.Sprintf("  %-18s  %7s  %9s  %8s  %9s  %5s  %-6s",
-			"IP", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
-		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 72))))
+		hdr := fmt.Sprintf("  %-18s  %7s  %7s  %9s  %8s  %9s  %5s  %-6s",
+			"IP", "SCORE", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
+		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 81))))
 
 		for i, r := range top {
 			tlsIcon := "✗"
@@ -1450,8 +1488,8 @@ func (m AppModel) viewResults() string {
 				colo = "—"
 			}
 			rank := styleAccent.Render(fmt.Sprintf(" %2d. ", i+1))
-			line := fmt.Sprintf("%-18s  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
-				r.IP.String(), r.Loss(),
+			line := fmt.Sprintf("%-18s  %7.1f  %6.1f%%  %9.2f  %8.2f  %9.1f  %5s  %-6s",
+				r.IP.String(), r.QualityScore(), r.Loss(),
 				float64(r.Avg().Milliseconds()),
 				float64(r.Jitter().Milliseconds()),
 				r.Throughput/1024,
@@ -1463,7 +1501,7 @@ func (m AppModel) viewResults() string {
 	total := len(m.scanResults)
 	healthy := 0
 	for _, r := range m.scanResults {
-		if r.IsHealthy() {
+		if r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 			healthy++
 		}
 	}
@@ -1511,10 +1549,10 @@ func (m AppModel) viewAbout() string {
 	var sb strings.Builder
 	sb.WriteString(banner.Render(m.bannerFrame / 2))
 	sb.WriteRune('\n')
-	sb.WriteString(styleTitle.Render("  SenPai Scanner\n"))
+	sb.WriteString(styleTitle.Render("  BSS (Better Senpai Scanner)\n"))
 	sb.WriteString(styleDim.Render(fmt.Sprintf("  version %s", m.version)))
 	sb.WriteString("\n\n")
-	sb.WriteString(styleNormal.Render("  A Cloudflare IP scanner built for high-latency, restricted networks."))
+	sb.WriteString(styleNormal.Render("  Better Senpai Scanner finds reliable Cloudflare IPs for restricted networks."))
 	sb.WriteRune('\n')
 
 	sb.WriteString(styleNormal.Render("  Probes Cloudflare's edge nodes via TCP/TLS/HTTP, measures loss,"))
@@ -1542,10 +1580,10 @@ func PrintTable(results []*result.Result, top int) {
 		sorted = sorted[:top]
 	}
 
-	hdr := fmt.Sprintf("  %-18s  %7s  %9s  %8s  %9s  %4s  %-5s",
-		"IP", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
+	hdr := fmt.Sprintf("  %-18s  %7s  %7s  %9s  %8s  %9s  %4s  %-5s",
+		"IP", "SCORE", "LOSS", "AVG(ms)", "JTR(ms)", "DL(KB/s)", "TLS", "COLO")
 	fmt.Println(hdr)
-	fmt.Println("  " + strings.Repeat("─", 72))
+	fmt.Println("  " + strings.Repeat("─", 81))
 	for _, r := range sorted {
 		tls := "✗"
 		if r.TLSOk {
@@ -1555,8 +1593,8 @@ func PrintTable(results []*result.Result, top int) {
 		if colo == "" {
 			colo = "—"
 		}
-		fmt.Printf("  %-18s  %6.1f%%  %9.2f  %8.2f  %9.1f  %4s  %-5s\n",
-			r.IP.String(), r.Loss(),
+		fmt.Printf("  %-18s  %7.1f  %6.1f%%  %9.2f  %8.2f  %9.1f  %4s  %-5s\n",
+			r.IP.String(), r.QualityScore(), r.Loss(),
 			float64(r.Avg().Milliseconds()),
 			float64(r.Jitter().Milliseconds()),
 			r.Throughput/1024,
@@ -2579,18 +2617,19 @@ func (m AppModel) viewConfigPhase1() string {
 
 	healthy := 0
 	for _, r := range m.configPhase1Results {
-		if r.IsHealthy() {
+		if r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 			healthy++
 		}
 	}
 
 	targetStr := fmt.Sprintf("%d", m.configPhase1Total)
-	sb.WriteString(fmt.Sprintf("  %s  tested: %s  candidates: %s  target: %s\n\n",
+	sb.WriteString(fmt.Sprintf("  %s  tested: %s  candidates: %s  target: %s\n",
 		icon,
 		styleAccent.Render(fmt.Sprintf("%d", len(m.configPhase1Results))),
 		styleGood.Render(fmt.Sprintf("%d", healthy)),
 		styleDim.Render(targetStr),
 	))
+	sb.WriteString(styleDim.Render(fmt.Sprintf("  max latency: %s", result.DefaultMaxPhase1AvgLatency)) + "\n\n")
 	if !m.configPhase1Done {
 		sb.WriteString(fmt.Sprintf("  %s  %s  ports: %s\n\n",
 			styleAccent.Render(scanPulse(m.bannerFrame)),
@@ -2633,9 +2672,9 @@ func (m AppModel) viewConfigPhase1() string {
 	}
 
 	if len(m.configPhase1Results) > 0 {
-		hdr := fmt.Sprintf("  %-22s  %7s  %9s  %-8s  %6s",
-			"ENDPOINT", "LOSS", "AVG(ms)", "COLO", "STATUS")
-		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 64))))
+		hdr := fmt.Sprintf("  %-22s  %7s  %7s  %9s  %-8s  %6s",
+			"ENDPOINT", "SCORE", "LOSS", "AVG(ms)", "COLO", "STATUS")
+		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 74))))
 
 		top := result.TopN(m.configPhase1Results, 20)
 		for _, r := range top {
@@ -2649,14 +2688,17 @@ func (m AppModel) viewConfigPhase1() string {
 				status = "✗"
 				lineStyle = styleBad
 			}
-			line := fmt.Sprintf("  %-22s  %6.1f%%  %9.2f  %-8s  %6s",
-				formatEndpoint(r.IP.String(), r.Port), r.Loss(),
+			line := fmt.Sprintf("  %-22s  %7.1f  %6.1f%%  %9.2f  %-8s  %6s",
+				formatEndpoint(r.IP.String(), r.Port), r.QualityScore(), r.Loss(),
 				float64(r.Avg().Milliseconds()), colo, status)
 			sb.WriteString(lineStyle.Render(line) + "\n")
 		}
 		sb.WriteRune('\n')
 	}
 
+	if m.statusMsg != "" {
+		sb.WriteString(styleGood.Render("  "+m.statusMsg) + "\n")
+	}
 	if m.configPhase1Done && m.configPhase1Only {
 		sb.WriteString(styleHint.Render("  c copy healthy endpoints   q/esc back") + "\n")
 	} else {

@@ -6,25 +6,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Art is the multi-line ASCII art for "SenPai Scanner".
+// Art is the multi-line ASCII art for "BSS".
 // Uses box-drawing block characters for a bold, retro look.
 const Art = `
- ░██████╗███████╗███╗░░██╗██████╗░░█████╗░██╗
- ██╔════╝██╔════╝████╗░██║██╔══██╗██╔══██╗██║
- ╚█████╗░█████╗░░██╔██╗██║██████╔╝███████║██║
- ░╚═══██╗██╔══╝░░██║╚████║██╔═══╝░██╔══██║██║
- ██████╔╝███████╗██║░╚███║██║░░░░░██║░░██║██║
- ╚═════╝░╚══════╝╚═╝░░╚══╝╚═╝░░░░░╚═╝░░╚═╝╚═╝
-
- ░██████╗░█████╗░░█████╗░███╗░░██╗███╗░░██╗███████╗██████╗░
- ██╔════╝██╔══██╗██╔══██╗████╗░██║████╗░██║██╔════╝██╔══██╗
- ╚█████╗░██║░░╚═╝███████║██╔██╗██║██╔██╗██║█████╗░░██████╔╝
- ░╚═══██╗██║░░██╗██╔══██║██║╚████║██║╚████║██╔══╝░░██╔══██╗
- ██████╔╝╚█████╔╝██║░░██║██║░╚███║██║░╚███║███████╗██║░░██║
- ╚═════╝░░╚════╝░╚═╝░░╚═╝╚═╝░░╚══╝╚═╝░░╚══╝╚══════╝╚═╝░░╚═╝`
+ ██████╗░░██████╗░██████╗
+ ██╔══██╗██╔════╝██╔════╝
+ ██████╔╝╚█████╗░╚█████╗░
+ ██╔══██╗░╚═══██╗░╚═══██╗
+ ██████╔╝██████╔╝██████╔╝
+ ╚═════╝░╚═════╝░╚═════╝░`
 
 // Tagline is shown beneath the art.
-const Tagline = "  Cloudflare IP Scanner — tuned for restricted networks"
+const Tagline = "  Better Senpai Scanner — tuned for restricted networks"
 
 // rainbowPalette is a smooth warm→cool gradient used for color cycling.
 var rainbowPalette = []string{

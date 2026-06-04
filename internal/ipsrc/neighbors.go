@@ -1,73 +1,66 @@
 package ipsrc
 
-import (
-	"encoding/binary"
-	"net"
-)
+import "net"
 
-// Default neighbor-scan limits for Phase 1 random scans.
+// Default neighbor-scan limits for Phase 1 random scans. A healthy IPv4 seed
+// may expand its entire /24, but the global cap prevents unbounded scan growth.
 const (
-	DefaultNeighborRadius   = 32
-	DefaultNeighborPerHit   = 12
-	DefaultNeighborMaxTotal = 400
+	DefaultNeighborRadius    = 32 // retained for compatibility with smaller outward searches
+	DefaultNeighborSeedLimit = 5
+	DefaultNeighborPerHit    = 64
+	DefaultNeighborMaxTotal  = 1000
 )
 
-// NeighborsAround returns up to limit IPv4 addresses near ip that also fall
-// inside one of nets. Addresses spread outward in both directions (±1, ±2, …)
-// so hits in dense Cloudflare blocks can surface nearby working IPs.
-func NeighborsAround(ip net.IP, nets []*net.IPNet, radius, limit int) []net.IP {
-	if limit <= 0 || radius <= 0 || len(nets) == 0 {
-		return nil
-	}
+// NeighborsIn24 returns up to limit usable addresses in the IPv4 seed's /24.
+// The network (.0) and broadcast (.255) addresses are never returned. When
+// nets is non-empty, candidates must also belong to one of those networks.
+func NeighborsIn24(ip net.IP, nets []*net.IPNet, limit int) []net.IP {
 	ip4 := ip.To4()
-	if ip4 == nil {
+	if ip4 == nil || limit <= 0 {
 		return nil
 	}
-
-	base := binary.BigEndian.Uint32(ip4)
+	if limit > 254 {
+		limit = 254
+	}
 	out := make([]net.IP, 0, limit)
-
-	for delta := uint32(1); delta <= uint32(radius) && len(out) < limit; delta++ {
-		for _, sign := range []int32{int32(delta), -int32(delta)} {
-			next, ok := offsetIPv4(base, sign)
-			if !ok {
-				continue
-			}
-			candidate := uint32ToIPv4(next)
-			if candidate.Equal(ip) {
-				continue
-			}
-			if !containsAnyNet(nets, candidate) {
-				continue
-			}
-			out = append(out, candidate)
-			if len(out) >= limit {
-				return out
-			}
+	for host := 1; host <= 254 && len(out) < limit; host++ {
+		candidate := net.IPv4(ip4[0], ip4[1], ip4[2], byte(host))
+		if len(nets) > 0 && !containsAnyNet(nets, candidate) {
+			continue
 		}
+		out = append(out, candidate)
 	}
 	return out
 }
 
-func offsetIPv4(base uint32, delta int32) (uint32, bool) {
-	if delta >= 0 {
-		sum := uint64(base) + uint64(delta)
-		if sum > 0xFFFFFFFF {
-			return 0, false
+// NeighborsAround is retained for callers that want a smaller outward search.
+func NeighborsAround(ip net.IP, nets []*net.IPNet, radius, limit int) []net.IP {
+	if radius <= 0 || limit <= 0 {
+		return nil
+	}
+	all := NeighborsIn24(ip, nets, 254)
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil
+	}
+	out := make([]net.IP, 0, limit)
+	for delta := 1; delta <= radius && len(out) < limit; delta++ {
+		for _, host := range []int{int(ip4[3]) + delta, int(ip4[3]) - delta} {
+			if host < 1 || host > 254 {
+				continue
+			}
+			for _, candidate := range all {
+				if int(candidate.To4()[3]) == host {
+					out = append(out, candidate)
+					break
+				}
+			}
+			if len(out) >= limit {
+				break
+			}
 		}
-		return uint32(sum), true
 	}
-	d := uint32(-delta)
-	if d > base {
-		return 0, false
-	}
-	return base - d, true
-}
-
-func uint32ToIPv4(v uint32) net.IP {
-	ip := make(net.IP, 4)
-	binary.BigEndian.PutUint32(ip, v)
-	return ip
+	return out
 }
 
 func containsAnyNet(nets []*net.IPNet, ip net.IP) bool {

@@ -26,3 +26,13 @@ var ScanDefaults = struct {
 	UseV6:       false,
 	Top:         10,
 }
+
+// Smart discovery defaults keep quality improvements bounded so Phase 1 scan
+// time remains close to a basic connectivity scan.
+const (
+	MaxSpeedTestCandidates = 100
+	SpeedTestBytes         = 256 * 1024
+	SpeedTestTimeout       = 10 * time.Second
+	MaxPreviousGoodIPs     = 500
+	MaxPreviousExpandSeeds = 20
+)

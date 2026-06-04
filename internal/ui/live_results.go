@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matinsenpai/senpaiscanner/internal/config"
+	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
 	"github.com/matinsenpai/senpaiscanner/internal/result"
 	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
 )
@@ -31,8 +33,10 @@ type LiveResultWriter struct {
 	phase1Only   bool
 	phase1Done   bool
 	phase1Rows   []*result.Result
+	phase1Seen   map[string]struct{}
 	phase2Rows   []*xraytest.ValidationResult
 	phase1Probed int
+	discovery    phase1DiscoveryStats
 }
 
 func newLiveResultWriter(withConfig bool) (*LiveResultWriter, string, error) {
@@ -45,6 +49,7 @@ func newLiveResultWriter(withConfig bool) (*LiveResultWriter, string, error) {
 		started:    time.Now(),
 		withConfig: withConfig,
 		phase:      1,
+		phase1Seen: make(map[string]struct{}),
 	}
 	if err := w.flush(); err != nil {
 		return nil, "", err
@@ -91,10 +96,27 @@ func (w *LiveResultWriter) AddPhase1(r *result.Result) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.phase1Probed++
-	if r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
-		w.phase1Rows = append(w.phase1Rows, r)
+	if w.phase1Seen == nil {
+		w.phase1Seen = make(map[string]struct{})
 	}
+	key := formatEndpoint(r.IP.String(), r.Port)
+	if _, ok := w.phase1Seen[key]; !ok {
+		w.phase1Seen[key] = struct{}{}
+		w.phase1Probed++
+	}
+	if r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
+		w.phase1Rows = upsertPhase1Result(w.phase1Rows, r)
+	}
+	_ = w.writeLocked()
+}
+
+func (w *LiveResultWriter) SetDiscoveryStats(stats phase1DiscoveryStats) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.discovery = stats
 	_ = w.writeLocked()
 }
 
@@ -150,9 +172,17 @@ func (w *LiveResultWriter) writeLocked() error {
 	sb.WriteString("\n")
 
 	healthy := len(w.phase1Rows)
-	sb.WriteString(fmt.Sprintf("=== Phase 1 — connectivity (%d healthy / %d probed) ===\n\n", healthy, w.phase1Probed))
-	sb.WriteString(fmt.Sprintf("  %-22s  %7s  %9s  %10s  %7s  %8s  %6s\n", "ENDPOINT", "SCORE", "RTT(ms)", "PROBE(ms)", "LOSS", "COLO", "STATUS"))
-	sb.WriteString("  " + strings.Repeat("─", 98) + "\n")
+	sb.WriteString(fmt.Sprintf("=== Phase 1 — connectivity (%d healthy / %d probed) ===\n", healthy, w.phase1Probed))
+	s := w.discovery
+	sb.WriteString(fmt.Sprintf("Previous good IPs loaded/retested/healthy: %d/%d/%d\n", s.PreviousLoaded, s.PreviousRetested, s.PreviousHealthy))
+	sb.WriteString(fmt.Sprintf("Neighbor seeds/queued/tested: %d/%d/%d (defaults: top %d, %d/seed, max %d)\n", s.SeedsExpanded, s.NeighborQueued, s.NeighborTested, ipsrc.DefaultNeighborSeedLimit, ipsrc.DefaultNeighborPerHit, ipsrc.DefaultNeighborMaxTotal))
+	sb.WriteString(fmt.Sprintf("Speed tests scheduled/started/completed/failed: %d/%d/%d/%d (default: top %d only)\n", s.SpeedTestsScheduled, s.SpeedTestsStarted, s.SpeedTestsCompleted, s.SpeedTestsFailed, config.MaxSpeedTestCandidates))
+	if s.LastSpeedTestError != "" {
+		sb.WriteString("Last speed failure: " + s.LastSpeedTestError + "\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("  %-22s  %7s  %9s  %10s  %11s  %7s  %8s  %6s\n", "ENDPOINT", "SCORE", "RTT(ms)", "PROBE(ms)", "SPEED(Mbps)", "LOSS", "COLO", "STATUS"))
+	sb.WriteString("  " + strings.Repeat("─", 112) + "\n")
 
 	rows := append([]*result.Result(nil), w.phase1Rows...)
 	sort.Slice(rows, func(i, j int) bool {
@@ -169,16 +199,44 @@ func (w *LiveResultWriter) writeLocked() error {
 			status := "healthy"
 			if !r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
 				status = "fail"
+			} else if r.SpeedTested && r.Throughput <= 0 {
+				status = "healthy; speed fail"
 			}
-			sb.WriteString(fmt.Sprintf("  %-22s  %7.1f  %9.2f  %10.2f  %6.1f%%  %-8s  %s\n",
+			sb.WriteString(fmt.Sprintf("  %-22s  %7.1f  %9.2f  %10.2f  %11s  %6.1f%%  %-8s  %s\n",
 				formatEndpoint(r.IP.String(), r.Port),
 				r.QualityScore(),
 				float64(r.RTT().Milliseconds()),
 				float64(r.Avg().Milliseconds()),
+				formatPhase1Speed(r),
 				r.Loss(),
 				colo,
 				status,
 			))
+		}
+	}
+
+	var speedFailures []*result.Result
+	for _, r := range rows {
+		if r.SpeedTestError != "" {
+			speedFailures = append(speedFailures, r)
+		}
+	}
+	if len(speedFailures) > 0 {
+		sb.WriteString("\n=== Speed test failures ===\n\n")
+		for _, r := range speedFailures {
+			sb.WriteString(fmt.Sprintf("  %-22s  %s\n", formatEndpoint(r.IP.String(), r.Port), r.SpeedTestError))
+		}
+	}
+
+	if stats := result.ColoStats(w.phase1Rows); len(stats) > 0 {
+		sb.WriteString("\n=== Colo summary ===\n\n")
+		sb.WriteString(fmt.Sprintf("  %-6s  %7s  %9s  %9s  %11s  %s\n", "COLO", "HEALTHY", "AVG RTT", "AVG SCORE", "AVG SPEED", "BEST IP"))
+		for _, stat := range stats {
+			speed := "—"
+			if stat.AvgSpeedMbps > 0 {
+				speed = fmt.Sprintf("%.2fMbps", stat.AvgSpeedMbps)
+			}
+			sb.WriteString(fmt.Sprintf("  %-6s  %7d  %7dms  %9.1f  %11s  %s\n", stat.Colo, stat.HealthyCount, stat.AvgRTT.Milliseconds(), stat.AvgScore, speed, stat.BestIP))
 		}
 	}
 

@@ -27,7 +27,8 @@ type Result struct {
 	Throughput       float64 // bytes/sec, 0 if not measured
 	DownloadBytes    int64
 	DownloadElapsed  time.Duration
-	SpeedTested      bool // true when a payload download check was attempted
+	SpeedTested      bool   // true when a payload download check was attempted
+	SpeedTestError   string // optional error recorded when a payload download check fails
 	Timestamp        time.Time
 }
 

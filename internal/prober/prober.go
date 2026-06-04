@@ -165,7 +165,7 @@ func SpeedTest(ctx context.Context, r *result.Result, cfg Config, bytes int64) {
 		return
 	}
 	r.SpeedTested = true
-	r.Throughput, r.DownloadBytes, r.DownloadElapsed = probeDownload(ctx, r.IP, r.Port, cfg.Timeout, bytes)
+	r.Throughput, r.DownloadBytes, r.DownloadElapsed = probeDownload(ctx, r.IP, r.Port, cfg.Timeout, bytes, cfg.InsecureSkipVerify)
 }
 
 // probeTCP measures a raw TCP connect time.
@@ -292,7 +292,7 @@ func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout tim
 
 	if httpStatus >= 200 && httpStatus < 400 && colo != "" {
 		if speedBytes > 0 {
-			throughput, _, _ = probeDownload(ctx, ip, port, timeout, speedBytes)
+			throughput, _, _ = probeDownload(ctx, ip, port, timeout, speedBytes, insecure)
 		}
 		if speedBytes > 0 || requireWS {
 			wsOk = probeWebSocket(ctx, ip, port, sni, wsHost, wsPath, timeout)
@@ -433,7 +433,7 @@ func normalizeWSPath(path string) string {
 // probeDownload fetches a small sample from speed.cloudflare.com while forcing
 // the TCP connection to the candidate IP. This is still not a full Xray/V2Ray
 // test, but it catches many IPs that handshake cleanly and then stall on data.
-func probeDownload(ctx context.Context, ip net.IP, port int, timeout time.Duration, bytes int64) (float64, int64, time.Duration) {
+func probeDownload(ctx context.Context, ip net.IP, port int, timeout time.Duration, bytes int64, insecure bool) (float64, int64, time.Duration) {
 	if bytes <= 0 {
 		return 0, 0, 0
 	}

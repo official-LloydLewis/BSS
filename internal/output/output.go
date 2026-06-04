@@ -61,7 +61,7 @@ func New(path string, fmt Format) (*Writer, error) {
 		w.csv = csv.NewWriter(f)
 		_ = w.csv.Write([]string{
 			"ip", "quality_score", "loss_pct", "rtt_ms", "avg_ms", "probe_avg_ms", "min_ms", "max_ms",
-			"jitter_ms", "speed_mbps", "download_bytes", "download_elapsed_ms", "speed_tested", "colo", "tls_ok", "ws_ok", "http_status",
+			"jitter_ms", "speed_mbps", "download_bytes", "download_elapsed_ms", "speed_tested", "speed_test_error", "colo", "tls_ok", "ws_ok", "http_status",
 		})
 		w.csv.Flush()
 	}
@@ -137,6 +137,7 @@ func (w *Writer) writeJSON(r *result.Result) error {
 		DownloadBytes     int64   `json:"download_bytes,omitempty"`
 		DownloadElapsedMs float64 `json:"download_elapsed_ms,omitempty"`
 		SpeedTested       bool    `json:"speed_tested,omitempty"`
+		SpeedTestError    string  `json:"speed_test_error,omitempty"`
 		Colo              string  `json:"colo,omitempty"`
 		TLSOk             bool    `json:"tls_ok"`
 		WSOk              bool    `json:"ws_ok"`
@@ -156,6 +157,7 @@ func (w *Writer) writeJSON(r *result.Result) error {
 		DownloadBytes:     r.DownloadBytes,
 		DownloadElapsedMs: float64(r.DownloadElapsed) / float64(time.Millisecond),
 		SpeedTested:       r.SpeedTested,
+		SpeedTestError:    r.SpeedTestError,
 		Colo:              r.Colo,
 		TLSOk:             r.TLSOk,
 		WSOk:              r.WSOk,

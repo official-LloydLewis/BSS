@@ -416,6 +416,8 @@ type phase1DiscoveryStats struct {
 	SeedsExpanded, NeighborQueued, NeighborTested     int
 	PreviousLoaded, PreviousRetested, PreviousHealthy int
 	SpeedTestCandidates, SpeedTested                  int
+	SpeedTestsScheduled, SpeedTestsStarted            int
+	SpeedTestsCompleted, SpeedTestsFailed             int
 }
 
 type neighborScanOpts struct {
@@ -528,15 +530,6 @@ func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports 
 			if addedForSeed > 0 {
 				stats.SeedsExpanded++
 			}
-			if addedForSeed > 0 {
-				stats.SeedsExpanded++
-			}
-		}
-		if neighbor.onStats != nil {
-			neighbor.onStats(stats)
-		}
-		if neighbor.onStats != nil {
-			neighbor.onStats(stats)
 		}
 		if neighbor.onStats != nil {
 			neighbor.onStats(stats)
@@ -638,6 +631,7 @@ func runCappedSpeedTests(ctx context.Context, results []*result.Result, concurre
 	}
 	candidates := result.TopN(results, limit)
 	stats.SpeedTestCandidates = len(candidates)
+	stats.SpeedTestsScheduled = len(candidates)
 	if onStats != nil {
 		onStats(*stats)
 	}
@@ -650,6 +644,15 @@ func runCappedSpeedTests(ctx context.Context, results []*result.Result, concurre
 	}
 	jobs := make(chan *result.Result)
 	done := make(chan *result.Result, workers)
+	var statsMu sync.Mutex
+	updateStats := func(update func()) {
+		statsMu.Lock()
+		defer statsMu.Unlock()
+		update()
+		if onStats != nil {
+			onStats(*stats)
+		}
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -660,6 +663,7 @@ func runCappedSpeedTests(ctx context.Context, results []*result.Result, concurre
 					return
 				}
 				updated := *original
+				updateStats(func() { stats.SpeedTestsStarted++ })
 				speed(ctx, &updated, cfg.WithPort(updated.Port), bytes)
 				select {
 				case done <- &updated:
@@ -681,11 +685,14 @@ func runCappedSpeedTests(ctx context.Context, results []*result.Result, concurre
 		}
 	}()
 	for updated := range done {
-		stats.SpeedTested++
+		updateStats(func() {
+			stats.SpeedTested++
+			stats.SpeedTestsCompleted++
+			if updated.SpeedTested && updated.Throughput <= 0 {
+				stats.SpeedTestsFailed++
+			}
+		})
 		callback(updated)
-		if onStats != nil {
-			onStats(*stats)
-		}
 	}
 }
 

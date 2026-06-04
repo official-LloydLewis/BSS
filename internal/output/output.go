@@ -59,7 +59,7 @@ func New(path string, fmt Format) (*Writer, error) {
 	if fmt == FormatCSV {
 		w.csv = csv.NewWriter(f)
 		_ = w.csv.Write([]string{
-			"ip", "quality_score", "loss_pct", "avg_ms", "min_ms", "max_ms",
+			"ip", "quality_score", "loss_pct", "rtt_ms", "avg_ms", "probe_avg_ms", "min_ms", "max_ms",
 			"jitter_ms", "download_kbps", "speed_tested", "colo", "tls_ok", "ws_ok", "http_status",
 		})
 		w.csv.Flush()
@@ -99,6 +99,8 @@ func (w *Writer) writeCSV(r *result.Result) error {
 		r.IP.String(),
 		fmt.Sprintf("%.1f", r.QualityScore()),
 		fmt.Sprintf("%.1f", r.Loss()),
+		fmt.Sprintf("%.2f", float64(r.RTT().Milliseconds())),
+		fmt.Sprintf("%.2f", float64(r.Avg().Milliseconds())),
 		fmt.Sprintf("%.2f", float64(r.Avg().Milliseconds())),
 		fmt.Sprintf("%.2f", float64(r.Min().Milliseconds())),
 		fmt.Sprintf("%.2f", float64(r.Max().Milliseconds())),
@@ -121,7 +123,9 @@ func (w *Writer) writeJSON(r *result.Result) error {
 		IP           string  `json:"ip"`
 		QualityScore float64 `json:"quality_score"`
 		LossPct      float64 `json:"loss_pct"`
+		RTTMs        float64 `json:"rtt_ms"`
 		AvgMs        float64 `json:"avg_ms"`
+		ProbeAvgMs   float64 `json:"probe_avg_ms"`
 		MinMs        float64 `json:"min_ms"`
 		MaxMs        float64 `json:"max_ms"`
 		JitterMs     float64 `json:"jitter_ms"`
@@ -136,7 +140,9 @@ func (w *Writer) writeJSON(r *result.Result) error {
 		IP:           r.IP.String(),
 		QualityScore: r.QualityScore(),
 		LossPct:      r.Loss(),
+		RTTMs:        ms(r.RTT()),
 		AvgMs:        ms(r.Avg()),
+		ProbeAvgMs:   ms(r.Avg()),
 		MinMs:        ms(r.Min()),
 		MaxMs:        ms(r.Max()),
 		JitterMs:     ms(r.Jitter()),

@@ -331,3 +331,47 @@ func withRequiredWebSocket(r Result, ok bool) Result {
 	r.WSOk = ok
 	return r
 }
+
+func TestQualityScoreUsesTCPConnectRTTInsteadOfProbeDuration(t *testing.T) {
+	lowRTTSlowProbe := &Result{
+		Latencies:        []time.Duration{800 * time.Millisecond, 800 * time.Millisecond},
+		ConnectLatencies: []time.Duration{110 * time.Millisecond, 110 * time.Millisecond},
+		TLSOk:            true,
+		HTTPStatus:       200,
+		Colo:             "FRA",
+	}
+	highRTTFastProbe := &Result{
+		Latencies:        []time.Duration{200 * time.Millisecond, 200 * time.Millisecond},
+		ConnectLatencies: []time.Duration{600 * time.Millisecond, 600 * time.Millisecond},
+		TLSOk:            true,
+		HTTPStatus:       200,
+		Colo:             "FRA",
+	}
+
+	if got, want := lowRTTSlowProbe.QualityScore(), highRTTFastProbe.QualityScore(); got <= want {
+		t.Fatalf("110ms RTT score = %.2f, 600ms RTT score = %.2f; low RTT should rank better despite slower full probe", got, want)
+	}
+}
+
+func TestQualityScoreDoesNotPenalizeLowRTTForSlowHTTPProbe(t *testing.T) {
+	fastProbe := &Result{Latencies: []time.Duration{150 * time.Millisecond}, ConnectLatencies: []time.Duration{110 * time.Millisecond}}
+	slowProbe := &Result{Latencies: []time.Duration{900 * time.Millisecond}, ConnectLatencies: []time.Duration{110 * time.Millisecond}}
+	if got, want := slowProbe.QualityScore(), fastProbe.QualityScore(); got != want {
+		t.Fatalf("slow probe score = %.2f, fast probe score = %.2f; equal RTT should score equally", got, want)
+	}
+}
+
+func TestQualityScoreStronglyPenalizesVeryHighRTT(t *testing.T) {
+	low := &Result{Latencies: []time.Duration{700 * time.Millisecond}, ConnectLatencies: []time.Duration{110 * time.Millisecond}}
+	veryHigh := &Result{Latencies: []time.Duration{700 * time.Millisecond}, ConnectLatencies: []time.Duration{2 * time.Second}}
+	if delta := low.QualityScore() - veryHigh.QualityScore(); delta < 10 {
+		t.Fatalf("RTT score penalty = %.2f, want at least 10 points (low %.2f, very high %.2f)", delta, low.QualityScore(), veryHigh.QualityScore())
+	}
+}
+
+func TestRTTFallsBackToFullProbeAverage(t *testing.T) {
+	r := &Result{Latencies: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}}
+	if got, want := r.RTT(), 150*time.Millisecond; got != want {
+		t.Fatalf("RTT() = %v, want fallback %v", got, want)
+	}
+}

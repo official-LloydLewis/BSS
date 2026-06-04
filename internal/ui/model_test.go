@@ -113,7 +113,7 @@ func TestConfigPhase1TableColumnsStayAligned(t *testing.T) {
 	lines := strings.Split(ansiRE.ReplaceAllString(m.viewConfigPhase1(), ""), "\n")
 	var headerLine, rowLine string
 	for _, line := range lines {
-		if strings.Contains(line, "ENDPOINT") && strings.Contains(line, "AVG(ms)") {
+		if strings.Contains(line, "ENDPOINT") && strings.Contains(line, "RTT(ms)") {
 			headerLine = line
 		}
 		if strings.Contains(line, "172.67.145.191:8443") {
@@ -126,7 +126,7 @@ func TestConfigPhase1TableColumnsStayAligned(t *testing.T) {
 	if rowLine == "" {
 		t.Fatal("missing Phase 1 table row")
 	}
-	for _, col := range []string{"SCORE", "LOSS", "AVG(ms)", "STATUS"} {
+	for _, col := range []string{"SCORE", "RTT(ms)", "PROBE(ms)", "LOSS", "STATUS"} {
 		if !strings.Contains(headerLine, col) {
 			t.Fatalf("header missing %s: %q", col, headerLine)
 		}
@@ -315,7 +315,7 @@ func TestCopyPhase1HealthyEndpointsCopiesRawIPsAndWritesLiveResultDirectory(t *t
 		return nil
 	}
 
-	m := AppModel{configPhase1Results: []*result.Result{
+	m := AppModel{liveResultPath: filepath.Join(dir, "BSSResult-20260604-120000.txt"), configPhase1Results: []*result.Result{
 		phase1HealthyResult("104.18.1.1", 443, 200*time.Millisecond),
 		phase1HealthyResult("104.18.1.2", 8443, 50*time.Millisecond),
 		phase1HealthyResult("104.18.1.2", 2053, 100*time.Millisecond),
@@ -341,7 +341,7 @@ func TestCopyPhase1HealthyEndpointsCopiesRawIPsAndWritesLiveResultDirectory(t *t
 	if !strings.Contains(message, "copied 2 raw healthy IPs") {
 		t.Fatalf("success message missing copy detail: %q", message)
 	}
-	if !strings.Contains(message, "saved raw IPs to healthy_ips_raw.txt") {
+	if !strings.Contains(message, "saved to "+path) {
 		t.Fatalf("success message missing save detail: %q", message)
 	}
 }
@@ -366,5 +366,27 @@ func phase1HealthyResult(ip string, port int, latency time.Duration) *result.Res
 		TLSOk:      true,
 		HTTPStatus: 200,
 		Colo:       "TEST",
+	}
+}
+
+func TestCopyPhase1RawHealthyIPsReportsFileWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	blockedDir := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blockedDir, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldClipboardWriteAll := clipboardWriteAll
+	t.Cleanup(func() { clipboardWriteAll = oldClipboardWriteAll })
+	clipboardWriteAll = func(string) error { return nil }
+
+	m := AppModel{
+		liveResultPath: filepath.Join(blockedDir, "BSSResult-20260604-120000.txt"),
+		configPhase1Results: []*result.Result{
+			phase1HealthyResult("104.18.1.1", 443, 50*time.Millisecond),
+		},
+	}
+	message := m.copyPhase1RawHealthyIPs()
+	if !strings.Contains(message, "copied 1 raw healthy IPs; failed to save raw IP file:") {
+		t.Fatalf("failure message = %q", message)
 	}
 }

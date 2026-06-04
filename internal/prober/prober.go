@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matinsenpai/senpaiscanner/internal/result"
@@ -81,12 +82,13 @@ func ParseMode(s string) (Mode, error) {
 // Probe runs a full measurement session against ip and returns a Result.
 func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 	r := &result.Result{
-		IP:        ip,
-		Port:      cfg.Port,
-		ProbeMode: cfg.Mode.String(),
-		Timestamp: time.Now(),
-		Latencies: make([]time.Duration, cfg.Tries),
-		RequireWS: cfg.RequireWebSocket,
+		IP:               ip,
+		Port:             cfg.Port,
+		ProbeMode:        cfg.Mode.String(),
+		Timestamp:        time.Now(),
+		Latencies:        make([]time.Duration, cfg.Tries),
+		ConnectLatencies: make([]time.Duration, cfg.Tries),
+		RequireWS:        cfg.RequireWebSocket,
 	}
 	if cfg.Mode == ModeHTTP && cfg.SpeedBytes > 0 {
 		r.SpeedTested = true
@@ -104,6 +106,7 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 		}
 
 		var lat time.Duration
+		var connectLat time.Duration
 		var tlsOk bool
 		var httpStatus int
 		var colo string
@@ -112,17 +115,19 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 		switch cfg.Mode {
 		case ModeTCP:
 			lat = probeTCP(ctx, ip, cfg.Port, cfg.Timeout)
+			connectLat = lat
 		case ModeTLS:
-			lat, tlsOk = probeTLS(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.InsecureSkipVerify)
+			lat, connectLat, tlsOk = probeTLS(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.InsecureSkipVerify)
 		case ModeHTTP:
 			var wsOk bool
-			lat, tlsOk, httpStatus, colo, throughput, wsOk = probeHTTP(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.SpeedBytes, cfg.InsecureSkipVerify, cfg.WebSocketHost, cfg.WebSocketPath, cfg.RequireWebSocket)
+			lat, connectLat, tlsOk, httpStatus, colo, throughput, wsOk = probeHTTP(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.SpeedBytes, cfg.InsecureSkipVerify, cfg.WebSocketHost, cfg.WebSocketPath, cfg.RequireWebSocket)
 			if wsOk {
 				r.WSOk = true
 			}
 		}
 
 		r.Latencies[i] = lat
+		r.ConnectLatencies[i] = connectLat
 		if tlsOk {
 			r.TLSOk = true
 		}
@@ -167,38 +172,52 @@ func probeTCP(ctx context.Context, ip net.IP, port int, timeout time.Duration) t
 	return lat
 }
 
-// probeTLS measures a TLS handshake time.
-func probeTLS(ctx context.Context, ip net.IP, port int, sni string, timeout time.Duration, insecure bool) (time.Duration, bool) {
+// probeTLS measures the full TCP+TLS handshake duration and separately records
+// the underlying TCP connect duration.
+func probeTLS(ctx context.Context, ip net.IP, port int, sni string, timeout time.Duration, insecure bool) (time.Duration, time.Duration, bool) {
 	addr := fmt.Sprintf("%s:%d", ip.String(), port)
 	dl := time.Now().Add(timeout)
 	dialCtx, cancel := context.WithDeadline(ctx, dl)
 	defer cancel()
 
-	d := tls.Dialer{
-		NetDialer: &net.Dialer{},
-		Config: &tls.Config{
-			ServerName:         sni,
-			InsecureSkipVerify: insecure,
-			MinVersion:         tls.VersionTLS12,
-		},
-	}
-
 	start := time.Now()
-	conn, err := d.DialContext(dialCtx, "tcp", addr)
+	tcpConn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", addr)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	lat := time.Since(start)
-	conn.Close()
-	return lat, true
+	connectLat := time.Since(start)
+	defer tcpConn.Close()
+	_ = tcpConn.SetDeadline(dl)
+
+	conn := tls.Client(tcpConn, &tls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: insecure,
+		MinVersion:         tls.VersionTLS12,
+	})
+	if err := conn.HandshakeContext(dialCtx); err != nil {
+		return 0, connectLat, false
+	}
+	return time.Since(start), connectLat, true
 }
 
 // probeHTTP fetches /cdn-cgi/trace to confirm the IP is a real Cloudflare edge
 // and to determine the colo identifier.
 func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout time.Duration, speedBytes int64, insecure bool, wsHost, wsPath string, requireWS bool) (
-	lat time.Duration, tlsOk bool, httpStatus int, colo string, throughput float64, wsOk bool,
+	lat time.Duration, connectLat time.Duration, tlsOk bool, httpStatus int, colo string, throughput float64, wsOk bool,
 ) {
 	addr := fmt.Sprintf("%s:%d", ip.String(), port)
+	var connectMu sync.Mutex
+	measuredConnectLat := time.Duration(0)
+	setConnectLat := func(lat time.Duration) {
+		connectMu.Lock()
+		measuredConnectLat = lat
+		connectMu.Unlock()
+	}
+	getConnectLat := func() time.Duration {
+		connectMu.Lock()
+		defer connectMu.Unlock()
+		return measuredConnectLat
+	}
 
 	// Budget split: TCP gets ¼, TLS gets ½, leaving ¼ guaranteed for the HTTP
 	// GET+response. Without this, on DPI-throttled networks the TLS handshake
@@ -206,7 +225,12 @@ func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout tim
 	// phase impossible and producing false-positive packet loss.
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: timeout / 4}).DialContext(ctx, network, addr)
+			start := time.Now()
+			conn, err := (&net.Dialer{Timeout: timeout / 4}).DialContext(ctx, network, addr)
+			if err == nil {
+				setConnectLat(time.Since(start))
+			}
+			return conn, err
 		},
 		TLSClientConfig: &tls.Config{
 			ServerName:         sni,
@@ -237,9 +261,10 @@ func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout tim
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, false, 0, "", 0, false
+		return 0, getConnectLat(), false, 0, "", 0, false
 	}
 	lat = time.Since(start)
+	connectLat = getConnectLat()
 	defer resp.Body.Close()
 
 	tlsOk = resp.TLS != nil

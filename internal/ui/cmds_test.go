@@ -168,14 +168,13 @@ func TestSpeedTestCandidateLimitRespected(t *testing.T) {
 	var stats phase1DiscoveryStats
 	runConfigPortProbesWithProbe(context.Background(), ips, []int{443}, 8, prober.Config{Port: 443, Mode: prober.ModeHTTP, SpeedBytes: config.SpeedTestBytes}, func(*result.Result) {}, neighborScanOpts{maxSpeedCandidates: config.MaxSpeedTestCandidates, onStats: func(s phase1DiscoveryStats) { stats = s }}, func(_ context.Context, ip net.IP, cfg prober.Config) *result.Result {
 		return &result.Result{IP: ip, Port: cfg.Port, ProbeMode: "http", Latencies: []time.Duration{time.Millisecond}, TLSOk: true, HTTPStatus: 200, Colo: "FRA"}
-	}, func(_ context.Context, r *result.Result, _ prober.Config, _ int64) error {
+	}, func(_ context.Context, r *result.Result, _ prober.Config, _ int64) {
 		speedCalls.Add(1)
 		r.SpeedTested = true
 		r.Throughput = 1
-		return nil
 	})
-	if speedCalls.Load() != config.MaxSpeedTestCandidates || stats.SpeedTestsCompleted != config.MaxSpeedTestCandidates {
-		t.Fatalf("speed calls/stats = %d/%d", speedCalls.Load(), stats.SpeedTestsCompleted)
+	if speedCalls.Load() != config.MaxSpeedTestCandidates || stats.SpeedTested != config.MaxSpeedTestCandidates {
+		t.Fatalf("speed calls/stats = %d/%d", speedCalls.Load(), stats.SpeedTested)
 	}
 }
 
@@ -189,11 +188,10 @@ func TestCancellationStopsSpeedWork(t *testing.T) {
 	var calls atomic.Int64
 	runConfigPortProbesWithProbe(ctx, ips, []int{443}, 2, prober.Config{Port: 443, Mode: prober.ModeHTTP, SpeedBytes: config.SpeedTestBytes}, func(*result.Result) {}, neighborScanOpts{maxSpeedCandidates: 20}, func(_ context.Context, ip net.IP, cfg prober.Config) *result.Result {
 		return &result.Result{IP: ip, Port: cfg.Port, ProbeMode: "http", Latencies: []time.Duration{time.Millisecond}, TLSOk: true, HTTPStatus: 200, Colo: "FRA"}
-	}, func(_ context.Context, _ *result.Result, _ prober.Config, _ int64) error {
+	}, func(_ context.Context, _ *result.Result, _ prober.Config, _ int64) {
 		if calls.Add(1) == 1 {
 			cancel()
 		}
-		return context.Canceled
 	})
 	if calls.Load() > 2 {
 		t.Fatalf("speed work continued after cancellation: %d calls", calls.Load())
@@ -230,43 +228,5 @@ func TestCancellationStopsExpansionWork(t *testing.T) {
 	})
 	if calls.Load() > 3 {
 		t.Fatalf("expansion work continued after cancellation: %d calls", calls.Load())
-	}
-}
-
-func TestSmartDiscoverySpeedPhaseRunsWhenProbeConfigHasNoSpeedBytes(t *testing.T) {
-	ips := make(chan net.IP, 1)
-	ips <- net.ParseIP("192.0.2.1")
-	close(ips)
-	var updates []*result.Result
-	var stats phase1DiscoveryStats
-	runConfigPortProbesWithProbe(context.Background(), ips, []int{443}, 1, prober.Config{Port: 443, Mode: prober.ModeHTTP}, func(r *result.Result) { updates = upsertPhase1Result(updates, r) }, neighborScanOpts{speedBytes: config.SpeedTestBytes, maxSpeedCandidates: 1, onStats: func(s phase1DiscoveryStats) { stats = s }}, func(_ context.Context, ip net.IP, cfg prober.Config) *result.Result {
-		return &result.Result{IP: ip, Port: cfg.Port, ProbeMode: "http", Latencies: []time.Duration{time.Millisecond}, TLSOk: true, HTTPStatus: 200, Colo: "FRA"}
-	}, func(_ context.Context, r *result.Result, _ prober.Config, _ int64) error {
-		r.SpeedTested = true
-		r.Throughput = 1_000_000
-		return nil
-	})
-	if stats.SpeedTestsScheduled != 1 || stats.SpeedTestsStarted != 1 || stats.SpeedTestsCompleted != 1 || stats.SpeedTestsFailed != 0 {
-		t.Fatalf("unexpected speed diagnostics: %+v", stats)
-	}
-	if len(updates) != 1 || updates[0].SpeedMbps() != 8 {
-		t.Fatalf("speed result was not written back: %+v", updates)
-	}
-}
-
-func TestSpeedTestFailuresAreCountedAndVisibleOnResult(t *testing.T) {
-	ips := make(chan net.IP, 1)
-	ips <- net.ParseIP("192.0.2.1")
-	close(ips)
-	var updated *result.Result
-	var stats phase1DiscoveryStats
-	runConfigPortProbesWithProbe(context.Background(), ips, []int{443}, 1, prober.Config{Port: 443, Mode: prober.ModeHTTP}, func(r *result.Result) { updated = r }, neighborScanOpts{speedBytes: config.SpeedTestBytes, maxSpeedCandidates: 1, onStats: func(s phase1DiscoveryStats) { stats = s }}, func(_ context.Context, ip net.IP, cfg prober.Config) *result.Result {
-		return &result.Result{IP: ip, Port: cfg.Port, ProbeMode: "http", Latencies: []time.Duration{time.Millisecond}, TLSOk: true, HTTPStatus: 200, Colo: "FRA"}
-	}, func(_ context.Context, r *result.Result, _ prober.Config, _ int64) error {
-		r.SpeedTested = true
-		return fmt.Errorf("download failed")
-	})
-	if stats.SpeedTestsFailed != 1 || updated == nil || updated.SpeedTestError != "download failed" {
-		t.Fatalf("failure diagnostics/result = %+v / %+v", stats, updated)
 	}
 }

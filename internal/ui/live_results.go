@@ -176,7 +176,7 @@ func (w *LiveResultWriter) writeLocked() error {
 	s := w.discovery
 	sb.WriteString(fmt.Sprintf("Previous good IPs loaded/retested/healthy: %d/%d/%d\n", s.PreviousLoaded, s.PreviousRetested, s.PreviousHealthy))
 	sb.WriteString(fmt.Sprintf("Neighbor seeds/queued/tested: %d/%d/%d (defaults: top %d, %d/seed, max %d)\n", s.SeedsExpanded, s.NeighborQueued, s.NeighborTested, ipsrc.DefaultNeighborSeedLimit, ipsrc.DefaultNeighborPerHit, ipsrc.DefaultNeighborMaxTotal))
-	sb.WriteString(fmt.Sprintf("Speed tests scheduled/started/completed/failed: %d/%d/%d/%d (default: top %d only)\n\n", s.SpeedTestsScheduled, s.SpeedTestsStarted, s.SpeedTestsCompleted, s.SpeedTestsFailed, config.MaxSpeedTestCandidates))
+	sb.WriteString(fmt.Sprintf("Speed tests candidates/tested: %d/%d (default: top %d only)\n\n", s.SpeedTestCandidates, s.SpeedTested, config.MaxSpeedTestCandidates))
 	sb.WriteString(fmt.Sprintf("  %-22s  %7s  %9s  %10s  %11s  %7s  %8s  %6s\n", "ENDPOINT", "SCORE", "RTT(ms)", "PROBE(ms)", "SPEED(Mbps)", "LOSS", "COLO", "STATUS"))
 	sb.WriteString("  " + strings.Repeat("─", 112) + "\n")
 

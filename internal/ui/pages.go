@@ -12,9 +12,9 @@ const (
 	PageColos
 	PageLiveColos
 	PageAbout
-	PageEmergencyScan  // emergency IP/config workflow
-	PageScanWithConfig // xray config - URL input
-	PageConfigSetup    // xray config - count/topN setup
+	PageScanWithConfig // setup: source, count, workers, timeout, ports
+	PageConfigOptional // optional config URL + Phase 2 top N
+	PageConfigSetup    // legacy setup (unused)
 	PageConfigPhase1   // xray config - fast connectivity scan
 	PageConfigPhase2   // xray config - xray validation
 )

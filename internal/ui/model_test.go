@@ -390,3 +390,19 @@ func TestCopyPhase1RawHealthyIPsReportsFileWriteFailure(t *testing.T) {
 		t.Fatalf("failure message = %q", message)
 	}
 }
+
+func TestPhase1ColoFiltersAffectExportButPreserveRawHistory(t *testing.T) {
+	m := NewApp("test")
+	m.configPhase1Results = []*result.Result{
+		{IP: net.ParseIP("104.24.72.1"), Port: 443, ProbeMode: "http", Latencies: []time.Duration{time.Millisecond}, TLSOk: true, HTTPStatus: 200, Colo: "FRA"},
+		{IP: net.ParseIP("104.24.72.2"), Port: 443, ProbeMode: "http", Latencies: []time.Duration{time.Millisecond}, TLSOk: true, HTTPStatus: 200, Colo: "AMS"},
+	}
+	m.configColoAllow = "FRA"
+	got := rawHealthyIPs(m.filteredPhase1Results())
+	if len(got) != 1 || got[0] != "104.24.72.1" {
+		t.Fatalf("filtered export = %v", got)
+	}
+	if len(m.configPhase1Results) != 2 {
+		t.Fatal("raw history was modified")
+	}
+}

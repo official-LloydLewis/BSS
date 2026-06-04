@@ -49,6 +49,7 @@ func TestLiveResultWriterRewritesHealthyPhase1Rows(t *testing.T) {
 		TLSOk:      true,
 		HTTPStatus: 200,
 		Colo:       "FRA",
+		Throughput: 1_000_000,
 	}
 	w.AddPhase1(r)
 	b, err := os.ReadFile(path)
@@ -64,6 +65,9 @@ func TestLiveResultWriterRewritesHealthyPhase1Rows(t *testing.T) {
 	}
 	if !strings.Contains(text, "BSS (Better Senpai Scanner) — live results") {
 		t.Fatalf("file missing BSS header:\n%s", text)
+	}
+	if !strings.Contains(text, "SPEED(Mbps)") || !strings.Contains(text, "8.00") {
+		t.Fatalf("file missing speed column/value:\n%s", text)
 	}
 	if !strings.Contains(text, "SCORE") {
 		t.Fatalf("file missing score column:\n%s", text)
@@ -87,5 +91,18 @@ func TestResolveTopNPreset(t *testing.T) {
 	m.configTopNIdx = 2
 	if got := m.resolveTopN(); got != 50 {
 		t.Fatalf("topN = %d, want 50", got)
+	}
+}
+
+func TestLiveResultWriterIncludesSpeedDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	w := &LiveResultWriter{path: filepath.Join(dir, "result.txt"), started: time.Now(), phase: 1, phase1Seen: make(map[string]struct{})}
+	w.SetDiscoveryStats(phase1DiscoveryStats{SpeedTestsScheduled: 3, SpeedTestsStarted: 2, SpeedTestsCompleted: 2, SpeedTestsFailed: 1})
+	b, err := os.ReadFile(w.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "Speed tests scheduled/started/completed/failed: 3/2/2/1") {
+		t.Fatalf("missing diagnostics:\n%s", b)
 	}
 }

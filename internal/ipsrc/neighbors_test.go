@@ -40,8 +40,8 @@ func TestNeighborsAroundSkipsOutsideRange(t *testing.T) {
 	nets := []*net.IPNet{mustParseCIDR(t, "192.0.2.0/29")}
 	hit := net.ParseIP("192.0.2.3")
 	got := NeighborsAround(hit, nets, 32, 10)
-	if len(got) != 7 {
-		t.Fatalf("neighbors = %d, want 7 inside /29", len(got))
+	if len(got) != 6 {
+		t.Fatalf("neighbors = %d, want 6 usable addresses inside /29", len(got))
 	}
 }
 
@@ -52,4 +52,19 @@ func mustParseCIDR(t *testing.T, cidr string) *net.IPNet {
 		t.Fatal(err)
 	}
 	return n
+}
+
+func TestNeighborsIn24ReturnsAllUsableHosts(t *testing.T) {
+	got := NeighborsIn24(net.ParseIP("104.24.72.189"), nil, 254)
+	if len(got) != 254 {
+		t.Fatalf("neighbors = %d, want 254", len(got))
+	}
+	if got[0].String() != "104.24.72.1" || got[len(got)-1].String() != "104.24.72.254" {
+		t.Fatalf("range = %s..%s, want .1..254", got[0], got[len(got)-1])
+	}
+	for _, ip := range got {
+		if host := ip.To4()[3]; host == 0 || host == 255 {
+			t.Fatalf("unexpected host %d", host)
+		}
+	}
 }

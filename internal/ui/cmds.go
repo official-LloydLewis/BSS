@@ -15,7 +15,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/matinsenpai/senpaiscanner/internal/config"
 	"github.com/matinsenpai/senpaiscanner/internal/engine"
+	"github.com/matinsenpai/senpaiscanner/internal/history"
 	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
 	"github.com/matinsenpai/senpaiscanner/internal/output"
 	"github.com/matinsenpai/senpaiscanner/internal/prober"
@@ -117,6 +119,7 @@ func runScan(cfg ScanConfig, scanID int64) {
 	scanCancel = cancel
 	defer cancel()
 
+	speedBytes := speedSampleForMode(mode)
 	engCfg := engine.Config{
 		Concurrency: concurrency,
 		ProbeConfig: prober.Config{
@@ -125,8 +128,8 @@ func runScan(cfg ScanConfig, scanID int64) {
 			Tries:            tries,
 			Timeout:          timeout,
 			SNI:              cfg.SNI,
-			SpeedBytes:       speedSampleForMode(mode),
-			RequireWebSocket: mode == prober.ModeHTTP && speedSampleForMode(mode) > 0,
+			SpeedBytes:       0,
+			RequireWebSocket: mode == prober.ModeHTTP && speedBytes > 0,
 		},
 	}
 	eng := engine.New(engCfg)
@@ -145,26 +148,43 @@ func runScan(cfg ScanConfig, scanID int64) {
 	}
 
 	ipStream := src.Stream(ctx, count)
-	eng.Run(ctx, ipStream, func(r *result.Result) {
-		if prog != nil {
-			s := eng.Stats()
-			prog.Send(StatsMsg{ScanID: scanID, Tested: s.Tested.Load(), Healthy: s.Healthy.Load(), Failed: s.Failed.Load(), InFlight: s.InFlight.Load()})
-		}
+	var scanMu sync.Mutex
+	var scanResults []*result.Result
+	sendResult := func(r *result.Result) {
 		if !passesColoFilter(r, coloSet) {
 			return
-		}
-		// Only healthy IPs go to the output file; writing every scanned IP
-		// would flood the file with thousands of failed probes.
-		if writer != nil && r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
-			if err := writer.Write(r); err != nil {
-				sendError(scanID, fmt.Sprintf("Output write failed: %v", err))
-			}
 		}
 		if prog != nil {
 			prog.Send(ResultMsg{ScanID: scanID, Result: r})
 		}
+	}
+	eng.Run(ctx, ipStream, func(r *result.Result) {
+		scanMu.Lock()
+		scanResults = append(scanResults, r)
+		scanMu.Unlock()
+		if prog != nil {
+			s := eng.Stats()
+			prog.Send(StatsMsg{ScanID: scanID, Tested: s.Tested.Load(), Healthy: s.Healthy.Load(), Failed: s.Failed.Load(), InFlight: s.InFlight.Load()})
+		}
+		sendResult(r)
 	})
-
+	if ctx.Err() == nil && speedBytes > 0 {
+		sendSpeedResult := func(r *result.Result) {
+			scanResults = upsertPhase1Result(scanResults, r)
+			sendResult(r)
+		}
+		runCappedSpeedTests(ctx, scanResults, concurrency, engCfg.ProbeConfig, speedBytes, config.MaxSpeedTestCandidates, prober.SpeedTest, sendSpeedResult, &phase1DiscoveryStats{}, nil)
+	}
+	if writer != nil {
+		for _, r := range result.TopN(scanResults, 0) {
+			if passesColoFilter(r, coloSet) {
+				if err := writer.Write(r); err != nil {
+					sendError(scanID, fmt.Sprintf("Output write failed: %v", err))
+					break
+				}
+			}
+		}
+	}
 	sendDone(scanID)
 }
 
@@ -295,7 +315,16 @@ func runConfigPhase1(opts configPhase1Options) {
 	scanCancel = cancel
 	defer cancel()
 
+	var phase1Results []*result.Result
+	phase1Index := make(map[string]int)
 	callback := func(r *result.Result) {
+		key := fmt.Sprintf("%s:%d", r.IP.String(), r.Port)
+		if idx, ok := phase1Index[key]; ok {
+			phase1Results[idx] = r
+		} else {
+			phase1Index[key] = len(phase1Results)
+			phase1Results = append(phase1Results, r)
+		}
 		if liveResultWriter != nil {
 			liveResultWriter.AddPhase1(r)
 		}
@@ -304,8 +333,22 @@ func runConfigPhase1(opts configPhase1Options) {
 		}
 	}
 
+	goodRecords, historyErr := history.LoadGoodLimit(".", config.MaxPreviousGoodIPs)
+	if historyErr != nil && prog != nil {
+		prog.Send(ConfigPhase1WarningMsg{Text: fmt.Sprintf("warning: ignoring corrupt %s: %v", history.GoodIPsFile, historyErr)})
+	}
+	previous := make([]net.IP, 0, len(goodRecords))
+	for _, rec := range goodRecords {
+		if ip := net.ParseIP(rec.IP); ip != nil {
+			previous = append(previous, ip)
+		}
+	}
+	if prog != nil {
+		prog.Send(ConfigPhase1StatsMsg{PreviousLoaded: len(previous)})
+	}
+
 	var ipStream <-chan net.IP
-	neighbor := neighborScanOpts{}
+	neighbor := neighborScanOpts{maxSpeedCandidates: config.MaxSpeedTestCandidates, speedBytes: config.SpeedTestBytes}
 	if opts.fromFile {
 		ips, err := loadDefaultIPsFile()
 		if err != nil {
@@ -334,16 +377,31 @@ func runConfigPhase1(opts configPhase1Options) {
 			}
 			return
 		}
-		ipStream = src.Stream(ctx, opts.count)
+		ipStream = prioritizedIPStream(ctx, previous, src.Stream(ctx, opts.count))
 		neighbor = neighborScanOpts{
-			enabled:  true,
-			nets:     src.IPv4Nets(),
-			radius:   ipsrc.DefaultNeighborRadius,
-			perHit:   ipsrc.DefaultNeighborPerHit,
-			maxTotal: ipsrc.DefaultNeighborMaxTotal,
+			enabled:            true,
+			nets:               src.IPv4Nets(),
+			maxSeeds:           ipsrc.DefaultNeighborSeedLimit,
+			perHit:             ipsrc.DefaultNeighborPerHit,
+			maxTotal:           ipsrc.DefaultNeighborMaxTotal,
+			previous:           ipSet(previous),
+			previousExpandable: ipSet(previous[:minInt(len(previous), config.MaxPreviousExpandSeeds)]),
+			maxSpeedCandidates: config.MaxSpeedTestCandidates,
+			speedBytes:         config.SpeedTestBytes,
+			onStats: func(stats phase1DiscoveryStats) {
+				if liveResultWriter != nil {
+					liveResultWriter.SetDiscoveryStats(stats)
+				}
+				if prog != nil {
+					prog.Send(ConfigPhase1StatsMsg{Discovery: stats})
+				}
+			},
 		}
 	}
 	runConfigPortProbes(ctx, ipStream, ports, opts.concurrency, probeCfg, callback, neighbor)
+	if err := history.SaveGoodResults(".", phase1Results); err != nil && prog != nil {
+		prog.Send(ConfigPhase1WarningMsg{Text: fmt.Sprintf("warning: failed to save %s: %v", history.GoodIPsFile, err)})
+	}
 
 	if prog != nil {
 		prog.Send(ConfigPhase1DoneMsg{})
@@ -351,31 +409,44 @@ func runConfigPhase1(opts configPhase1Options) {
 }
 
 type configProbeJob struct {
-	ip   net.IP
-	port int
+	ip       net.IP
+	port     int
+	neighbor bool
+}
+
+type phase1DiscoveryStats struct {
+	SeedsExpanded, NeighborQueued, NeighborTested                                 int
+	PreviousLoaded, PreviousRetested, PreviousHealthy                             int
+	SpeedTestsScheduled, SpeedTestsStarted, SpeedTestsCompleted, SpeedTestsFailed int
 }
 
 type neighborScanOpts struct {
-	enabled  bool
-	nets     []*net.IPNet
-	radius   int
-	perHit   int
-	maxTotal int
+	enabled            bool
+	nets               []*net.IPNet
+	maxSeeds           int
+	perHit             int
+	maxTotal           int
+	previous           map[string]struct{}
+	previousExpandable map[string]struct{}
+	maxSpeedCandidates int
+	speedBytes         int64
+	onStats            func(phase1DiscoveryStats)
 }
 
 type probeFunc func(context.Context, net.IP, prober.Config) *result.Result
+type speedTestFunc func(context.Context, *result.Result, prober.Config, int64) error
 
 func runConfigPortProbes(ctx context.Context, ips <-chan net.IP, ports []int, concurrency int, base prober.Config, callback func(*result.Result), neighbor neighborScanOpts) {
-	runConfigPortProbesWithProbe(ctx, ips, ports, concurrency, base, callback, neighbor, prober.Probe)
+	runConfigPortProbesWithProbe(ctx, ips, ports, concurrency, base, callback, neighbor, prober.Probe, prober.SpeedTest)
 }
 
-func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports []int, concurrency int, base prober.Config, callback func(*result.Result), neighbor neighborScanOpts, probe probeFunc) {
+func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports []int, concurrency int, base prober.Config, callback func(*result.Result), neighbor neighborScanOpts, probe probeFunc, speedFns ...speedTestFunc) {
 	if concurrency <= 0 {
 		concurrency = 50
 	}
 	if neighbor.enabled {
-		if neighbor.radius <= 0 {
-			neighbor.radius = ipsrc.DefaultNeighborRadius
+		if neighbor.maxSeeds <= 0 {
+			neighbor.maxSeeds = ipsrc.DefaultNeighborSeedLimit
 		}
 		if neighbor.perHit <= 0 {
 			neighbor.perHit = ipsrc.DefaultNeighborPerHit
@@ -384,62 +455,84 @@ func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports 
 			neighbor.maxTotal = ipsrc.DefaultNeighborMaxTotal
 		}
 	}
+	if neighbor.maxSpeedCandidates <= 0 {
+		neighbor.maxSpeedCandidates = config.MaxSpeedTestCandidates
+	}
+	if neighbor.speedBytes <= 0 {
+		neighbor.speedBytes = base.SpeedBytes
+	}
+	basicCfg := base
+	basicCfg.SpeedBytes = 0
 
 	jobs := make(chan configProbeJob)
 	results := make(chan *result.Result, concurrency)
 	seen := make(map[string]struct{})
 	var queue []configProbeJob
 	var pending int
-	neighborsQueued := 0
+	stats := phase1DiscoveryStats{PreviousLoaded: len(neighbor.previous)}
+	neighborJobs := make(map[string]struct{})
+	previousRetested := make(map[string]struct{})
+	var allResults []*result.Result
 
-	jobKey := func(ip net.IP, port int) string {
-		return fmt.Sprintf("%s:%d", ip.String(), port)
-	}
-
-	submit := func(ip net.IP, port int) bool {
+	jobKey := func(ip net.IP, port int) string { return fmt.Sprintf("%s:%d", ip.String(), port) }
+	submit := func(ip net.IP, port int, isNeighbor bool) bool {
 		key := jobKey(ip, port)
 		if _, ok := seen[key]; ok {
 			return false
 		}
 		seen[key] = struct{}{}
-		queue = append(queue, configProbeJob{ip: ip, port: port})
+		if isNeighbor {
+			neighborJobs[key] = struct{}{}
+		}
+		queue = append(queue, configProbeJob{ip: ip, port: port, neighbor: isNeighbor})
 		pending++
 		return true
 	}
-
 	enqueueIP := func(ip net.IP) {
 		for _, port := range ports {
-			submit(ip, port)
+			submit(ip, port, false)
 		}
 	}
 
-	maybeEnqueueNeighbors := func(r *result.Result) {
-		if !neighbor.enabled || !r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) || len(neighbor.nets) == 0 {
+	enqueueBestNeighbors := func() {
+		if !neighbor.enabled || len(neighbor.nets) == 0 {
 			return
 		}
-
-		remaining := neighbor.maxTotal - neighborsQueued
-		if remaining <= 0 {
-			return
-		}
-		limit := neighbor.perHit
-		if limit > remaining {
-			limit = remaining
-		}
-
-		for _, nip := range ipsrc.NeighborsAround(r.IP, neighbor.nets, neighbor.radius, limit) {
-			if neighborsQueued >= neighbor.maxTotal {
+		for _, seed := range result.TopN(allResults, 0) {
+			if stats.SeedsExpanded >= neighbor.maxSeeds || stats.NeighborQueued >= neighbor.maxTotal {
 				break
 			}
-			added := 0
-			for _, port := range ports {
-				if submit(nip, port) {
-					added++
+			ip := seed.IP.String()
+			if _, wasPrevious := neighbor.previous[ip]; wasPrevious {
+				if _, allowed := neighbor.previousExpandable[ip]; !allowed {
+					continue
 				}
 			}
-			if added > 0 {
-				neighborsQueued++
+			addedForSeed := 0
+			for _, nip := range ipsrc.NeighborsIn24(seed.IP, neighbor.nets, 254) {
+				if addedForSeed >= neighbor.perHit || stats.NeighborQueued >= neighbor.maxTotal {
+					break
+				}
+				addedIP := false
+				for _, port := range ports {
+					if stats.NeighborQueued >= neighbor.maxTotal {
+						break
+					}
+					if submit(nip, port, true) {
+						stats.NeighborQueued++
+						addedIP = true
+					}
+				}
+				if addedIP {
+					addedForSeed++
+				}
 			}
+			if addedForSeed > 0 {
+				stats.SeedsExpanded++
+			}
+		}
+		if neighbor.onStats != nil {
+			neighbor.onStats(stats)
 		}
 	}
 
@@ -450,9 +543,9 @@ func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports 
 			defer wg.Done()
 			for job := range jobs {
 				if ctx.Err() != nil {
-					continue
+					return
 				}
-				r := probe(ctx, job.ip, base.WithPort(job.port))
+				r := probe(ctx, job.ip, basicCfg.WithPort(job.port))
 				select {
 				case results <- r:
 				case <-ctx.Done():
@@ -463,14 +556,23 @@ func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports 
 	}
 
 	input := ips
-	for input != nil || pending > 0 || len(queue) > 0 {
+	expansionStarted := !neighbor.enabled
+	for {
+		if input == nil && pending == 0 && len(queue) == 0 {
+			if !expansionStarted {
+				expansionStarted = true
+				enqueueBestNeighbors()
+				if len(queue) > 0 {
+					continue
+				}
+			}
+			break
+		}
 		var send chan<- configProbeJob
 		var next configProbeJob
 		if len(queue) > 0 {
-			send = jobs
-			next = queue[0]
+			send, next = jobs, queue[0]
 		}
-
 		select {
 		case <-ctx.Done():
 			close(jobs)
@@ -490,12 +592,162 @@ func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports 
 			if r == nil {
 				continue
 			}
+			key := jobKey(r.IP, r.Port)
+			if _, ok := neighborJobs[key]; ok {
+				stats.NeighborTested++
+				delete(neighborJobs, key)
+			}
+			if _, ok := neighbor.previous[r.IP.String()]; ok {
+				if _, counted := previousRetested[r.IP.String()]; !counted {
+					previousRetested[r.IP.String()] = struct{}{}
+					stats.PreviousRetested++
+					if r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) {
+						stats.PreviousHealthy++
+					}
+				}
+			}
+			allResults = append(allResults, r)
 			callback(r)
-			maybeEnqueueNeighbors(r)
+			if neighbor.onStats != nil {
+				neighbor.onStats(stats)
+			}
 		}
 	}
 	close(jobs)
 	wg.Wait()
+	if ctx.Err() != nil || neighbor.speedBytes <= 0 {
+		return
+	}
+	speedFn := prober.SpeedTest
+	if len(speedFns) > 0 && speedFns[0] != nil {
+		speedFn = speedFns[0]
+	}
+	runCappedSpeedTests(ctx, allResults, concurrency, basicCfg, neighbor.speedBytes, neighbor.maxSpeedCandidates, speedFn, callback, &stats, neighbor.onStats)
+}
+
+func runCappedSpeedTests(ctx context.Context, results []*result.Result, concurrency int, cfg prober.Config, bytes int64, limit int, speed speedTestFunc, callback func(*result.Result), stats *phase1DiscoveryStats, onStats func(phase1DiscoveryStats)) {
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	candidates := result.TopN(results, limit)
+	stats.SpeedTestsScheduled = len(candidates)
+	if onStats != nil {
+		onStats(*stats)
+	}
+	if len(candidates) == 0 || ctx.Err() != nil {
+		return
+	}
+	workers := concurrency
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
+	jobs := make(chan *result.Result)
+	done := make(chan *result.Result, workers)
+	var wg sync.WaitGroup
+	var statsMu sync.Mutex
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for original := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				updated := *original
+				statsMu.Lock()
+				stats.SpeedTestsStarted++
+				if onStats != nil {
+					onStats(*stats)
+				}
+				statsMu.Unlock()
+				err := speed(ctx, &updated, cfg.WithPort(updated.Port), bytes)
+				if err != nil && updated.SpeedTestError == "" {
+					updated.SpeedTestError = err.Error()
+				}
+				select {
+				case done <- &updated:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	go func() { wg.Wait(); close(done) }()
+	go func() {
+		defer close(jobs)
+		for _, candidate := range candidates {
+			select {
+			case jobs <- candidate:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	for updated := range done {
+		statsMu.Lock()
+		stats.SpeedTestsCompleted++
+		if updated.Throughput <= 0 {
+			stats.SpeedTestsFailed++
+		}
+		if onStats != nil {
+			onStats(*stats)
+		}
+		statsMu.Unlock()
+		callback(updated)
+	}
+}
+
+func prioritizedIPStream(ctx context.Context, first []net.IP, rest <-chan net.IP) <-chan net.IP {
+	out := make(chan net.IP)
+	go func() {
+		defer close(out)
+		seen := make(map[string]struct{})
+		send := func(ip net.IP) bool {
+			if ip == nil {
+				return true
+			}
+			key := ip.String()
+			if _, ok := seen[key]; ok {
+				return true
+			}
+			seen[key] = struct{}{}
+			select {
+			case out <- ip:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		for _, ip := range first {
+			if !send(ip) {
+				return
+			}
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ip, ok := <-rest:
+				if !ok {
+					return
+				}
+				if !send(ip) {
+					return
+				}
+			}
+		}
+	}()
+	return out
+}
+
+func ipSet(ips []net.IP) map[string]struct{} {
+	set := make(map[string]struct{}, len(ips))
+	for _, ip := range ips {
+		if ip != nil {
+			set[ip.String()] = struct{}{}
+		}
+	}
+	return set
 }
 
 func defaultPhase1ProbeConfig(timeout time.Duration) prober.Config {
@@ -505,7 +757,7 @@ func defaultPhase1ProbeConfig(timeout time.Duration) prober.Config {
 		Tries:      3,
 		Timeout:    timeout,
 		SNI:        "speed.cloudflare.com",
-		SpeedBytes: 64 * 1024,
+		SpeedBytes: config.SpeedTestBytes,
 	}
 }
 
@@ -625,11 +877,7 @@ func speedSampleForMode(mode prober.Mode) int64 {
 	if mode != prober.ModeHTTP {
 		return 0
 	}
-	// 64 KB is enough to detect IPs that stall on real data while still
-	// completing reliably on restricted/high-latency networks. 256 KB was too
-	// large: on throttled connections it consistently timed out, making every
-	// IP appear unhealthy even when the trace GET succeeded fine.
-	return 64 * 1024
+	return config.SpeedTestBytes
 }
 
 func parseTimeout(raw string, fallback time.Duration) time.Duration {

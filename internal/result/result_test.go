@@ -101,8 +101,8 @@ func TestHTTPHealthRequiresCloudflareValidation(t *testing.T) {
 	}
 
 	r.SpeedTested = true
-	if r.IsHealthy() {
-		t.Fatal("expected speed-tested result with zero throughput to be unhealthy")
+	if !r.IsHealthy() {
+		t.Fatal("expected speed-test failure not to invalidate protocol health")
 	}
 
 	r.Throughput = 256 * 1024
@@ -373,5 +373,20 @@ func TestRTTFallsBackToFullProbeAverage(t *testing.T) {
 	r := &Result{Latencies: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}}
 	if got, want := r.RTT(), 150*time.Millisecond; got != want {
 		t.Fatalf("RTT() = %v, want fallback %v", got, want)
+	}
+}
+
+func TestSpeedMbpsCalculation(t *testing.T) {
+	r := Result{Throughput: 1_000_000}
+	if got := r.SpeedMbps(); got != 8 {
+		t.Fatalf("SpeedMbps = %v, want 8", got)
+	}
+}
+
+func TestQualityScoreThroughputCannotHideExtremelyBadRTT(t *testing.T) {
+	fastRTT := withThroughput(Result{Latencies: []time.Duration{20 * time.Millisecond}}, 64*1024)
+	badRTT := withThroughput(Result{Latencies: []time.Duration{5 * time.Second}}, 100*1024*1024)
+	if badRTT.QualityScore() >= fastRTT.QualityScore() {
+		t.Fatalf("bad RTT score %.1f outranked fast RTT %.1f", badRTT.QualityScore(), fastRTT.QualityScore())
 	}
 }

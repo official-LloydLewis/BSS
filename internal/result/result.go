@@ -25,7 +25,9 @@ type Result struct {
 	HTTPStatus       int
 	Colo             string
 	Throughput       float64 // bytes/sec, 0 if not measured
-	SpeedTested      bool    // true when a payload download check was attempted
+	DownloadBytes    int64
+	DownloadElapsed  time.Duration
+	SpeedTested      bool // true when a payload download check was attempted
 	Timestamp        time.Time
 }
 
@@ -135,6 +137,14 @@ func jitterDurations(values []time.Duration) time.Duration {
 	return time.Duration(math.Sqrt(variance))
 }
 
+// SpeedMbps returns measured throughput in decimal megabits per second.
+func (r *Result) SpeedMbps() float64 {
+	if r == nil || r.Throughput <= 0 {
+		return 0
+	}
+	return r.Throughput * 8 / 1_000_000
+}
+
 // QualityScore returns a deterministic 0–100 score for ranking Phase 1 results.
 // Higher scores prefer stable, low-latency connections with better throughput
 // and successful protocol validation.
@@ -151,9 +161,11 @@ func (r *Result) QualityScore() float64 {
 	}
 
 	throughput := math.Max(r.Throughput, 0)
-	throughputScore := clampQuality(100 * (1 - math.Exp(-throughput/(512*1024))))
+	throughputScore := clampQuality(100 * (1 - math.Exp(-throughput/(1024*1024))))
 
-	score := lossScore*0.35 + latencyScore*0.25 + jitterScore*0.15 + throughputScore*0.15
+	// Loss and RTT remain dominant. Throughput can distinguish otherwise
+	// similar candidates, but cannot rescue a very slow or lossy edge.
+	score := lossScore*0.40 + latencyScore*0.30 + jitterScore*0.15 + throughputScore*0.10
 	if r.TLSOk {
 		score += 2
 	}
@@ -201,9 +213,6 @@ func (r *Result) IsHealthy() bool {
 			return false
 		}
 		if r.HTTPStatus < 200 || r.HTTPStatus >= 400 || r.Colo == "" {
-			return false
-		}
-		if r.SpeedTested && r.Throughput <= 0 {
 			return false
 		}
 		if r.RequireWS && !r.WSOk {

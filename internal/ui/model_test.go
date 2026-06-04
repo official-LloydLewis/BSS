@@ -34,6 +34,14 @@ func TestMenuOnlyShowsMainWorkflow(t *testing.T) {
 	}
 }
 
+func TestAboutUsesBSSBranding(t *testing.T) {
+	m := NewApp("test")
+	view := ansiRE.ReplaceAllString(m.viewAbout(), "")
+	if !strings.Contains(view, "BSS (Better Senpai Scanner)") {
+		t.Fatalf("About view missing BSS branding: %q", view)
+	}
+}
+
 func TestResolvePhase1OptionsUsesRandomCloudflareDefaults(t *testing.T) {
 	m := NewApp("test")
 	m.configURL = "vless://12345678-1234-1234-1234-123456789abc@example.com:443?encryption=none&security=tls&type=ws&host=example.com&path=%2F#test"
@@ -118,7 +126,7 @@ func TestConfigPhase1TableColumnsStayAligned(t *testing.T) {
 	if rowLine == "" {
 		t.Fatal("missing Phase 1 table row")
 	}
-	for _, col := range []string{"LOSS", "AVG(ms)", "STATUS"} {
+	for _, col := range []string{"SCORE", "LOSS", "AVG(ms)", "STATUS"} {
 		if !strings.Contains(headerLine, col) {
 			t.Fatalf("header missing %s: %q", col, headerLine)
 		}
@@ -128,6 +136,7 @@ func TestConfigPhase1TableColumnsStayAligned(t *testing.T) {
 		value  string
 	}{
 		{header: "ENDPOINT", value: "172.67.145.191:8443"},
+		{header: "SCORE", value: strconv.FormatFloat(m.configPhase1Results[0].QualityScore(), 'f', 1, 64)},
 		{header: "COLO", value: "DME"},
 	} {
 		headerStart := strings.Index(headerLine, tc.header)

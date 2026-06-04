@@ -59,7 +59,7 @@ func New(path string, fmt Format) (*Writer, error) {
 	if fmt == FormatCSV {
 		w.csv = csv.NewWriter(f)
 		_ = w.csv.Write([]string{
-			"ip", "loss_pct", "avg_ms", "min_ms", "max_ms",
+			"ip", "quality_score", "loss_pct", "avg_ms", "min_ms", "max_ms",
 			"jitter_ms", "download_kbps", "speed_tested", "colo", "tls_ok", "ws_ok", "http_status",
 		})
 		w.csv.Flush()
@@ -97,6 +97,7 @@ func (w *Writer) Close() error {
 func (w *Writer) writeCSV(r *result.Result) error {
 	row := []string{
 		r.IP.String(),
+		fmt.Sprintf("%.1f", r.QualityScore()),
 		fmt.Sprintf("%.1f", r.Loss()),
 		fmt.Sprintf("%.2f", float64(r.Avg().Milliseconds())),
 		fmt.Sprintf("%.2f", float64(r.Min().Milliseconds())),
@@ -117,32 +118,34 @@ func (w *Writer) writeCSV(r *result.Result) error {
 // writeJSON appends one JSONL record (no trailing comma, no enclosing array).
 func (w *Writer) writeJSON(r *result.Result) error {
 	type jsonResult struct {
-		IP          string  `json:"ip"`
-		LossPct     float64 `json:"loss_pct"`
-		AvgMs       float64 `json:"avg_ms"`
-		MinMs       float64 `json:"min_ms"`
-		MaxMs       float64 `json:"max_ms"`
-		JitterMs    float64 `json:"jitter_ms"`
-		DownloadKB  float64 `json:"download_kbps,omitempty"`
-		SpeedTested bool    `json:"speed_tested,omitempty"`
-		Colo        string  `json:"colo,omitempty"`
-		TLSOk       bool    `json:"tls_ok"`
-		WSOk        bool    `json:"ws_ok"`
-		HTTPStatus  int     `json:"http_status,omitempty"`
+		IP           string  `json:"ip"`
+		QualityScore float64 `json:"quality_score"`
+		LossPct      float64 `json:"loss_pct"`
+		AvgMs        float64 `json:"avg_ms"`
+		MinMs        float64 `json:"min_ms"`
+		MaxMs        float64 `json:"max_ms"`
+		JitterMs     float64 `json:"jitter_ms"`
+		DownloadKB   float64 `json:"download_kbps,omitempty"`
+		SpeedTested  bool    `json:"speed_tested,omitempty"`
+		Colo         string  `json:"colo,omitempty"`
+		TLSOk        bool    `json:"tls_ok"`
+		WSOk         bool    `json:"ws_ok"`
+		HTTPStatus   int     `json:"http_status,omitempty"`
 	}
 	obj := jsonResult{
-		IP:          r.IP.String(),
-		LossPct:     r.Loss(),
-		AvgMs:       ms(r.Avg()),
-		MinMs:       ms(r.Min()),
-		MaxMs:       ms(r.Max()),
-		JitterMs:    ms(r.Jitter()),
-		DownloadKB:  r.Throughput / 1024,
-		SpeedTested: r.SpeedTested,
-		Colo:        r.Colo,
-		TLSOk:       r.TLSOk,
-		WSOk:        r.WSOk,
-		HTTPStatus:  r.HTTPStatus,
+		IP:           r.IP.String(),
+		QualityScore: r.QualityScore(),
+		LossPct:      r.Loss(),
+		AvgMs:        ms(r.Avg()),
+		MinMs:        ms(r.Min()),
+		MaxMs:        ms(r.Max()),
+		JitterMs:     ms(r.Jitter()),
+		DownloadKB:   r.Throughput / 1024,
+		SpeedTested:  r.SpeedTested,
+		Colo:         r.Colo,
+		TLSOk:        r.TLSOk,
+		WSOk:         r.WSOk,
+		HTTPStatus:   r.HTTPStatus,
 	}
 	b, err := json.Marshal(obj)
 	if err != nil {

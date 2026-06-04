@@ -1,4 +1,4 @@
-# SenPai Scanner
+# BSS (Better Senpai Scanner)
 
 [![CI](https://github.com/matinsenpai/senpaiscanner/actions/workflows/ci.yml/badge.svg)](https://github.com/matinsenpai/senpaiscanner/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/matinsenpai/senpaiscanner?style=flat-square)](https://github.com/matinsenpai/senpaiscanner/releases/latest)
@@ -123,7 +123,7 @@ Press **Enter** on the last row to continue to the optional config step.
 
 **Enter** with an empty config field starts a connectivity-only scan. Paste a URL, set **Top N**, then **Enter** again to run full validation.
 
-**Live results file:** every scan writes (and keeps updating) `SenPaiScannerResult-YYYYMMDD-HHMMSS.txt` next to the binary or in the working directory. Open it in any editor while the scan runs to watch results arrive.
+**Live results file:** every scan writes (and keeps updating) `BSSResult-YYYYMMDD-HHMMSS.txt` next to the binary or in the working directory. Open it in any editor while the scan runs to watch results arrive.
 
 ### Setup details
 
@@ -136,6 +136,8 @@ Press **Enter** on the last row to continue to the optional config step.
 ### Phase 1 — Finding reachable IPs
 
 Without a config URL, Phase 1 uses a standard Cloudflare HTTP probe (`speed.cloudflare.com`, 64 KiB sample). With a config URL, probes use SNI/host/path from your link and require WebSocket success when `type=ws`.
+
+Phase 1 result tables include a **SCORE** column: a quality score that favors lower loss, jitter, and latency, higher throughput, and successful protocol validation.
 
 Press `q` / `Esc` to cancel and return to the menu.
 
@@ -183,10 +185,10 @@ Version string and short project blurb; `Enter` / `q` / `Esc` back to the menu.
 ## FAQ
 
 **Why doesn't it just run a ping?**
-Cloudflare drops ICMP on their edge IPs. SenPai Scanner validates HTTP/TLS behaviour and, for proxy configs, runs traffic through xray — closer to real VLESS/Trojan usage than ping or bare TCP.
+Cloudflare drops ICMP on their edge IPs. BSS (Better Senpai Scanner) validates HTTP/TLS behaviour and, for proxy configs, runs traffic through xray — closer to real VLESS/Trojan usage than ping or bare TCP.
 
 **How is this different from warp-plus?**
-SenPai Scanner does not run a permanent proxy. It finds and validates Cloudflare IPs for **your** xray config and exports `IP:port` lists you can plug into Sing-Box, v2rayN, etc.
+BSS (Better Senpai Scanner) does not run a permanent proxy. It finds and validates Cloudflare IPs for **your** xray config and exports `IP:port` lists you can plug into Sing-Box, v2rayN, etc.
 
 **Where do the IP ranges come from?**
 Embedded from Cloudflare's official published lists (`cloudflare.com/ips-v4`, `cloudflare.com/ips-v6`). The binary ships with a snapshot; ranges rarely change.

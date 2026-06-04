@@ -993,7 +993,7 @@ func copyAndSaveIPs(ips []string) string {
 	clipErr := clipboardWriteAll(text)
 	path, fileErr := writeIPsBesideExecutable(ips)
 	rawIPs := rawIPsFromEndpoints(ips)
-	rawPath, rawErr := writeNamedIPsBesideExecutable("healthy_ips_raw.txt", rawIPs)
+	rawPath, rawErr := writeRawIPsBesideLiveResult(rawIPs)
 
 	parts := make([]string, 0, 3)
 	if clipErr == nil {
@@ -1036,6 +1036,20 @@ func rawIPsFromEndpoints(endpoints []string) []string {
 		raw = append(raw, ip)
 	}
 	return raw
+}
+
+func writeRawIPsBesideLiveResult(ips []string) (string, error) {
+	dir := ""
+	if liveResultWriter != nil && liveResultWriter.path != "" {
+		dir = filepath.Dir(liveResultWriter.path)
+	} else if dirs := resultFileDirs(); len(dirs) > 0 {
+		dir = dirs[0]
+	}
+	if dir == "" {
+		dir = "."
+	}
+	path := filepath.Join(dir, "healthy_ips_raw.txt")
+	return path, writeIPsFile(path, ips)
 }
 
 func writeIPsBesideExecutable(ips []string) (string, error) {
@@ -2672,7 +2686,7 @@ func (m AppModel) viewConfigPhase1() string {
 	}
 
 	if len(m.configPhase1Results) > 0 {
-		hdr := fmt.Sprintf("  %-22s  %7s  %7s  %9s  %-8s  %6s",
+		hdr := fmt.Sprintf("  %-22s  %8s %7s  %10s %-8s  %6s",
 			"ENDPOINT", "SCORE", "LOSS", "AVG(ms)", "COLO", "STATUS")
 		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 74))))
 
@@ -2700,7 +2714,7 @@ func (m AppModel) viewConfigPhase1() string {
 		sb.WriteString(styleGood.Render("  "+m.statusMsg) + "\n")
 	}
 	if m.configPhase1Done && m.configPhase1Only {
-		sb.WriteString(styleHint.Render("  c copy healthy endpoints   q/esc back") + "\n")
+		sb.WriteString(styleHint.Render("  c copy raw healthy IPs   q/esc back") + "\n")
 	} else {
 		sb.WriteString(styleHint.Render("  q/esc cancel") + "\n")
 	}
@@ -2711,7 +2725,7 @@ func (m AppModel) handleConfigPhase1Key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "c":
 		if m.configPhase1Done && m.configPhase1Only {
-			m.statusMsg = m.copyPhase1HealthyEndpoints()
+			m.statusMsg = m.copyPhase1RawHealthyIPs()
 			return m, nil
 		}
 	case "esc", "q":
@@ -2725,16 +2739,51 @@ func (m AppModel) handleConfigPhase1Key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m AppModel) copyPhase1HealthyEndpoints() string {
-	top := result.TopN(m.configPhase1Results, 0)
-	if len(top) == 0 {
-		return "no healthy endpoints to copy"
+func (m AppModel) copyPhase1RawHealthyIPs() string {
+	rawIPs := rawHealthyIPs(m.configPhase1Results)
+	if len(rawIPs) == 0 {
+		return "no raw healthy IPs to copy"
 	}
-	endpoints := make([]string, 0, len(top))
+	return copyAndSaveRawHealthyIPs(rawIPs)
+}
+
+// rawHealthyIPs returns unique healthy Phase 1 IPs in the same quality order
+// used by the Phase 1 healthy endpoint list.
+func rawHealthyIPs(results []*result.Result) []string {
+	top := result.TopN(results, 0)
+	seen := make(map[string]struct{}, len(top))
+	rawIPs := make([]string, 0, len(top))
 	for _, r := range top {
-		endpoints = append(endpoints, formatEndpoint(r.IP.String(), r.Port))
+		ip := r.IP.String()
+		if ip == "<nil>" || ip == "" {
+			continue
+		}
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		rawIPs = append(rawIPs, ip)
 	}
-	return copyAndSaveIPs(endpoints)
+	return rawIPs
+}
+
+func copyAndSaveRawHealthyIPs(rawIPs []string) string {
+	text := strings.Join(rawIPs, "\n") + "\n"
+	clipErr := clipboardWriteAll(text)
+	_, fileErr := writeRawIPsBesideLiveResult(rawIPs)
+
+	parts := make([]string, 0, 2)
+	if clipErr == nil {
+		parts = append(parts, fmt.Sprintf("copied %d raw healthy IPs", len(rawIPs)))
+	} else {
+		parts = append(parts, fmt.Sprintf("raw healthy IP clipboard failed: %v", clipErr))
+	}
+	if fileErr == nil {
+		parts = append(parts, "saved raw IPs to healthy_ips_raw.txt")
+	} else {
+		parts = append(parts, fmt.Sprintf("raw IP save failed: %v", fileErr))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // configPhase1Options holds the resolved settings for a Phase 1 engine run.

@@ -120,6 +120,16 @@ func (w *LiveResultWriter) SetDiscoveryStats(stats phase1DiscoveryStats) {
 	_ = w.writeLocked()
 }
 
+func (w *LiveResultWriter) SetDiscoveryStats(stats phase1DiscoveryStats) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.discovery = stats
+	_ = w.writeLocked()
+}
+
 func (w *LiveResultWriter) BeginPhase2() {
 	if w == nil {
 		return
@@ -176,11 +186,7 @@ func (w *LiveResultWriter) writeLocked() error {
 	s := w.discovery
 	sb.WriteString(fmt.Sprintf("Previous good IPs loaded/retested/healthy: %d/%d/%d\n", s.PreviousLoaded, s.PreviousRetested, s.PreviousHealthy))
 	sb.WriteString(fmt.Sprintf("Neighbor seeds/queued/tested: %d/%d/%d (defaults: top %d, %d/seed, max %d)\n", s.SeedsExpanded, s.NeighborQueued, s.NeighborTested, ipsrc.DefaultNeighborSeedLimit, ipsrc.DefaultNeighborPerHit, ipsrc.DefaultNeighborMaxTotal))
-	sb.WriteString(fmt.Sprintf("Speed tests scheduled/started/completed/failed: %d/%d/%d/%d (default: top %d only)\n", s.SpeedTestsScheduled, s.SpeedTestsStarted, s.SpeedTestsCompleted, s.SpeedTestsFailed, config.MaxSpeedTestCandidates))
-	if s.LastSpeedTestError != "" {
-		sb.WriteString("Last speed failure: " + s.LastSpeedTestError + "\n")
-	}
-	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("Speed tests candidates/tested: %d/%d (default: top %d only)\n\n", s.SpeedTestCandidates, s.SpeedTested, config.MaxSpeedTestCandidates))
 	sb.WriteString(fmt.Sprintf("  %-22s  %7s  %9s  %10s  %11s  %7s  %8s  %6s\n", "ENDPOINT", "SCORE", "RTT(ms)", "PROBE(ms)", "SPEED(Mbps)", "LOSS", "COLO", "STATUS"))
 	sb.WriteString("  " + strings.Repeat("─", 112) + "\n")
 
@@ -212,19 +218,6 @@ func (w *LiveResultWriter) writeLocked() error {
 				colo,
 				status,
 			))
-		}
-	}
-
-	var speedFailures []*result.Result
-	for _, r := range rows {
-		if r.SpeedTestError != "" {
-			speedFailures = append(speedFailures, r)
-		}
-	}
-	if len(speedFailures) > 0 {
-		sb.WriteString("\n=== Speed test failures ===\n\n")
-		for _, r := range speedFailures {
-			sb.WriteString(fmt.Sprintf("  %-22s  %s\n", formatEndpoint(r.IP.String(), r.Port), r.SpeedTestError))
 		}
 	}
 

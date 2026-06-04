@@ -2685,12 +2685,7 @@ func (m AppModel) viewConfigPhase1() string {
 	sb.WriteString(styleDim.Render(fmt.Sprintf("  speed tests: top %d healthy candidates only", config.MaxSpeedTestCandidates)) + "\n")
 	st := m.configPhase1Stats
 	sb.WriteString(styleDim.Render(fmt.Sprintf("  previous good IPs loaded/retested/healthy: %d/%d/%d", st.PreviousLoaded, st.PreviousRetested, st.PreviousHealthy)) + "\n")
-	sb.WriteString(styleDim.Render(fmt.Sprintf("  neighbor seeds/queued/tested: %d/%d/%d", st.SeedsExpanded, st.NeighborQueued, st.NeighborTested)) + "\n")
-	sb.WriteString(styleDim.Render(fmt.Sprintf("  speed tests scheduled/started/completed/failed: %d/%d/%d/%d", st.SpeedTestsScheduled, st.SpeedTestsStarted, st.SpeedTestsCompleted, st.SpeedTestsFailed)) + "\n")
-	if st.LastSpeedTestError != "" {
-		sb.WriteString(styleWarn.Render("  last speed failure: "+st.LastSpeedTestError) + "\n")
-	}
-	sb.WriteString("\n")
+	sb.WriteString(styleDim.Render(fmt.Sprintf("  neighbor seeds/queued/tested: %d/%d/%d", st.SeedsExpanded, st.NeighborQueued, st.NeighborTested)) + "\n\n")
 	if !m.configPhase1Done {
 		sb.WriteString(fmt.Sprintf("  %s  %s  ports: %s\n\n",
 			styleAccent.Render(scanPulse(m.bannerFrame)),

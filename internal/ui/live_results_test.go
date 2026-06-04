@@ -97,26 +97,12 @@ func TestResolveTopNPreset(t *testing.T) {
 func TestLiveResultWriterIncludesSpeedDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	w := &LiveResultWriter{path: filepath.Join(dir, "result.txt"), started: time.Now(), phase: 1, phase1Seen: make(map[string]struct{})}
-	w.SetDiscoveryStats(phase1DiscoveryStats{SpeedTestsScheduled: 3, SpeedTestsStarted: 2, SpeedTestsCompleted: 2, SpeedTestsFailed: 1, LastSpeedTestError: "download timeout"})
+	w.SetDiscoveryStats(phase1DiscoveryStats{SpeedTestsScheduled: 3, SpeedTestsStarted: 2, SpeedTestsCompleted: 2, SpeedTestsFailed: 1})
 	b, err := os.ReadFile(w.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "Speed tests scheduled/started/completed/failed: 3/2/2/1") || !strings.Contains(string(b), "Last speed failure: download timeout") {
+	if !strings.Contains(string(b), "Speed tests scheduled/started/completed/failed: 3/2/2/1") {
 		t.Fatalf("missing diagnostics:\n%s", b)
-	}
-}
-
-func TestLiveResultWriterExportsExplicitSpeedFailureReason(t *testing.T) {
-	dir := t.TempDir()
-	w := &LiveResultWriter{path: filepath.Join(dir, "result.txt"), started: time.Now(), phase: 1, phase1Seen: make(map[string]struct{})}
-	w.AddPhase1(&result.Result{IP: net.ParseIP("104.18.1.1"), Port: 443, ProbeMode: "http", Latencies: []time.Duration{time.Millisecond}, TLSOk: true, HTTPStatus: 200, Colo: "FRA", SpeedTested: true, SpeedTestError: "download timeout"})
-	b, err := os.ReadFile(w.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(b)
-	if !strings.Contains(text, "Speed test failures") || !strings.Contains(text, "104.18.1.1:443") || !strings.Contains(text, "download timeout") {
-		t.Fatalf("missing explicit failure reason:\n%s", text)
 	}
 }

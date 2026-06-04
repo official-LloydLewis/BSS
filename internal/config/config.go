@@ -32,7 +32,6 @@ var ScanDefaults = struct {
 const (
 	MaxSpeedTestCandidates = 100
 	SpeedTestBytes         = 256 * 1024
-	SpeedTestTimeout       = 10 * time.Second
 	MaxPreviousGoodIPs     = 500
 	MaxPreviousExpandSeeds = 20
 )

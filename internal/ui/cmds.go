@@ -347,16 +347,8 @@ func runConfigPhase1(opts configPhase1Options) {
 		prog.Send(ConfigPhase1StatsMsg{PreviousLoaded: len(previous)})
 	}
 
-	statsCallback := func(stats phase1DiscoveryStats) {
-		if liveResultWriter != nil {
-			liveResultWriter.SetDiscoveryStats(stats)
-		}
-		if prog != nil {
-			prog.Send(ConfigPhase1StatsMsg{Discovery: stats})
-		}
-	}
 	var ipStream <-chan net.IP
-	neighbor := neighborScanOpts{maxSpeedCandidates: config.MaxSpeedTestCandidates, speedBytes: config.SpeedTestBytes, onStats: statsCallback}
+	neighbor := neighborScanOpts{maxSpeedCandidates: config.MaxSpeedTestCandidates, speedBytes: config.SpeedTestBytes}
 	if opts.fromFile {
 		ips, err := loadDefaultIPsFile()
 		if err != nil {
@@ -394,9 +386,14 @@ func runConfigPhase1(opts configPhase1Options) {
 			maxTotal:           ipsrc.DefaultNeighborMaxTotal,
 			previous:           ipSet(previous),
 			previousExpandable: ipSet(previous[:minInt(len(previous), config.MaxPreviousExpandSeeds)]),
-			maxSpeedCandidates: config.MaxSpeedTestCandidates,
-			speedBytes:         config.SpeedTestBytes,
-			onStats:            statsCallback,
+			onStats: func(stats phase1DiscoveryStats) {
+				if liveResultWriter != nil {
+					liveResultWriter.SetDiscoveryStats(stats)
+				}
+				if prog != nil {
+					prog.Send(ConfigPhase1StatsMsg{Discovery: stats})
+				}
+			},
 		}
 	}
 	runConfigPortProbes(ctx, ipStream, ports, opts.concurrency, probeCfg, callback, neighbor)
@@ -416,10 +413,9 @@ type configProbeJob struct {
 }
 
 type phase1DiscoveryStats struct {
-	SeedsExpanded, NeighborQueued, NeighborTested                                 int
-	PreviousLoaded, PreviousRetested, PreviousHealthy                             int
-	SpeedTestsScheduled, SpeedTestsStarted, SpeedTestsCompleted, SpeedTestsFailed int
-	LastSpeedTestError                                                            string
+	SeedsExpanded, NeighborQueued, NeighborTested     int
+	PreviousLoaded, PreviousRetested, PreviousHealthy int
+	SpeedTestCandidates, SpeedTested                  int
 }
 
 type neighborScanOpts struct {
@@ -436,7 +432,7 @@ type neighborScanOpts struct {
 }
 
 type probeFunc func(context.Context, net.IP, prober.Config) *result.Result
-type speedTestFunc func(context.Context, *result.Result, prober.Config, int64) error
+type speedTestFunc func(context.Context, *result.Result, prober.Config, int64)
 
 func runConfigPortProbes(ctx context.Context, ips <-chan net.IP, ports []int, concurrency int, base prober.Config, callback func(*result.Result), neighbor neighborScanOpts) {
 	runConfigPortProbesWithProbe(ctx, ips, ports, concurrency, base, callback, neighbor, prober.Probe, prober.SpeedTest)
@@ -532,6 +528,15 @@ func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports 
 			if addedForSeed > 0 {
 				stats.SeedsExpanded++
 			}
+			if addedForSeed > 0 {
+				stats.SeedsExpanded++
+			}
+		}
+		if neighbor.onStats != nil {
+			neighbor.onStats(stats)
+		}
+		if neighbor.onStats != nil {
+			neighbor.onStats(stats)
 		}
 		if neighbor.onStats != nil {
 			neighbor.onStats(stats)
@@ -631,11 +636,8 @@ func runCappedSpeedTests(ctx context.Context, results []*result.Result, concurre
 	if concurrency <= 0 {
 		concurrency = 1
 	}
-	if cfg.Timeout < config.SpeedTestTimeout {
-		cfg.Timeout = config.SpeedTestTimeout
-	}
 	candidates := result.TopN(results, limit)
-	stats.SpeedTestsScheduled = len(candidates)
+	stats.SpeedTestCandidates = len(candidates)
 	if onStats != nil {
 		onStats(*stats)
 	}
@@ -649,7 +651,6 @@ func runCappedSpeedTests(ctx context.Context, results []*result.Result, concurre
 	jobs := make(chan *result.Result)
 	done := make(chan *result.Result, workers)
 	var wg sync.WaitGroup
-	var statsMu sync.Mutex
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -659,16 +660,7 @@ func runCappedSpeedTests(ctx context.Context, results []*result.Result, concurre
 					return
 				}
 				updated := *original
-				statsMu.Lock()
-				stats.SpeedTestsStarted++
-				if onStats != nil {
-					onStats(*stats)
-				}
-				statsMu.Unlock()
-				err := speed(ctx, &updated, cfg.WithPort(updated.Port), bytes)
-				if err != nil && updated.SpeedTestError == "" {
-					updated.SpeedTestError = err.Error()
-				}
+				speed(ctx, &updated, cfg.WithPort(updated.Port), bytes)
 				select {
 				case done <- &updated:
 				case <-ctx.Done():
@@ -689,19 +681,11 @@ func runCappedSpeedTests(ctx context.Context, results []*result.Result, concurre
 		}
 	}()
 	for updated := range done {
-		statsMu.Lock()
-		stats.SpeedTestsCompleted++
-		if updated.Throughput <= 0 {
-			stats.SpeedTestsFailed++
-			if updated.SpeedTestError != "" {
-				stats.LastSpeedTestError = updated.SpeedTestError
-			}
-		}
+		stats.SpeedTested++
+		callback(updated)
 		if onStats != nil {
 			onStats(*stats)
 		}
-		statsMu.Unlock()
-		callback(updated)
 	}
 }
 

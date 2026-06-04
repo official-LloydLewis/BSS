@@ -53,7 +53,7 @@ func newLiveResultWriter(withConfig bool) (*LiveResultWriter, string, error) {
 }
 
 func liveResultFilePath() (string, error) {
-	name := fmt.Sprintf("SenPaiScannerResult-%s.txt", time.Now().Format("20060102-150405"))
+	name := fmt.Sprintf("BSSResult-%s.txt", time.Now().Format("20060102-150405"))
 	for _, dir := range resultFileDirs() {
 		if dir == "" {
 			continue
@@ -139,7 +139,7 @@ func (w *LiveResultWriter) flush() error {
 
 func (w *LiveResultWriter) writeLocked() error {
 	var sb strings.Builder
-	sb.WriteString("SenPai Scanner — live results\n")
+	sb.WriteString("BSS (Better Senpai Scanner) — live results\n")
 	sb.WriteString(fmt.Sprintf("Started: %s\n", w.started.Format("2006-01-02 15:04:05")))
 	sb.WriteString(fmt.Sprintf("Updated: %s\n", time.Now().Format("2006-01-02 15:04:05")))
 	if w.withConfig {
@@ -151,8 +151,8 @@ func (w *LiveResultWriter) writeLocked() error {
 
 	healthy := len(w.phase1Rows)
 	sb.WriteString(fmt.Sprintf("=== Phase 1 — connectivity (%d healthy / %d probed) ===\n\n", healthy, w.phase1Probed))
-	sb.WriteString(fmt.Sprintf("  %-22s  %7s  %9s  %8s  %6s\n", "ENDPOINT", "LOSS", "AVG(ms)", "COLO", "STATUS"))
-	sb.WriteString("  " + strings.Repeat("─", 64) + "\n")
+	sb.WriteString(fmt.Sprintf("  %-22s  %7s  %7s  %9s  %8s  %6s\n", "ENDPOINT", "SCORE", "LOSS", "AVG(ms)", "COLO", "STATUS"))
+	sb.WriteString("  " + strings.Repeat("─", 74) + "\n")
 
 	rows := append([]*result.Result(nil), w.phase1Rows...)
 	sort.Slice(rows, func(i, j int) bool {
@@ -170,8 +170,9 @@ func (w *LiveResultWriter) writeLocked() error {
 			if !r.IsHealthy() {
 				status = "fail"
 			}
-			sb.WriteString(fmt.Sprintf("  %-22s  %6.1f%%  %9.2f  %-8s  %s\n",
+			sb.WriteString(fmt.Sprintf("  %-22s  %7.1f  %6.1f%%  %9.2f  %-8s  %s\n",
 				formatEndpoint(r.IP.String(), r.Port),
+				r.QualityScore(),
 				r.Loss(),
 				float64(r.Avg().Milliseconds()),
 				colo,

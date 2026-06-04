@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,7 +18,7 @@ func TestLiveResultFileNameFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := filepath.Base(path)
-	if !strings.HasPrefix(base, "SenPaiScannerResult-") {
+	if !strings.HasPrefix(base, "BSSResult-") {
 		t.Fatalf("basename = %q", base)
 	}
 	if !strings.HasSuffix(base, ".txt") {
@@ -40,7 +41,7 @@ func TestLiveResultWriterRewritesHealthyPhase1Rows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.AddPhase1(&result.Result{
+	r := &result.Result{
 		IP:         net.ParseIP("104.18.1.1"),
 		Port:       443,
 		Latencies:  []time.Duration{100 * time.Millisecond},
@@ -48,7 +49,8 @@ func TestLiveResultWriterRewritesHealthyPhase1Rows(t *testing.T) {
 		TLSOk:      true,
 		HTTPStatus: 200,
 		Colo:       "FRA",
-	})
+	}
+	w.AddPhase1(r)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +61,15 @@ func TestLiveResultWriterRewritesHealthyPhase1Rows(t *testing.T) {
 	}
 	if !strings.Contains(text, "Phase 1") {
 		t.Fatalf("file missing phase header:\n%s", text)
+	}
+	if !strings.Contains(text, "BSS (Better Senpai Scanner) — live results") {
+		t.Fatalf("file missing BSS header:\n%s", text)
+	}
+	if !strings.Contains(text, "SCORE") {
+		t.Fatalf("file missing score column:\n%s", text)
+	}
+	if score := fmt.Sprintf("%.1f", r.QualityScore()); !strings.Contains(text, score) {
+		t.Fatalf("file missing formatted score %s:\n%s", score, text)
 	}
 }
 

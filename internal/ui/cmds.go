@@ -538,6 +538,9 @@ func runConfigPortProbesWithProbe(ctx context.Context, ips <-chan net.IP, ports 
 		if neighbor.onStats != nil {
 			neighbor.onStats(stats)
 		}
+		if neighbor.onStats != nil {
+			neighbor.onStats(stats)
+		}
 	}
 
 	var wg sync.WaitGroup

@@ -120,6 +120,16 @@ func (w *LiveResultWriter) SetDiscoveryStats(stats phase1DiscoveryStats) {
 	_ = w.writeLocked()
 }
 
+func (w *LiveResultWriter) SetDiscoveryStats(stats phase1DiscoveryStats) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.discovery = stats
+	_ = w.writeLocked()
+}
+
 func (w *LiveResultWriter) BeginPhase2() {
 	if w == nil {
 		return

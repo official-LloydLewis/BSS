@@ -444,8 +444,9 @@ func probeDownload(ctx context.Context, ip net.IP, port int, timeout time.Durati
 			return (&net.Dialer{Timeout: timeout / 4}).DialContext(ctx, network, addr)
 		},
 		TLSClientConfig: &tls.Config{
-			ServerName: "speed.cloudflare.com",
-			MinVersion: tls.VersionTLS12,
+			ServerName:         "speed.cloudflare.com",
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: insecure,
 		},
 		DisableKeepAlives:   true,
 		TLSHandshakeTimeout: timeout / 2,

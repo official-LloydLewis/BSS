@@ -90,9 +90,6 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 		ConnectLatencies: make([]time.Duration, cfg.Tries),
 		RequireWS:        cfg.RequireWebSocket,
 	}
-	if cfg.Mode == ModeHTTP && cfg.SpeedBytes > 0 {
-		r.SpeedTested = true
-	}
 
 	for i := 0; i < cfg.Tries; i++ {
 		if ctx.Err() != nil {
@@ -120,7 +117,7 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 			lat, connectLat, tlsOk = probeTLS(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.InsecureSkipVerify)
 		case ModeHTTP:
 			var wsOk bool
-			lat, connectLat, tlsOk, httpStatus, colo, throughput, wsOk = probeHTTP(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.SpeedBytes, cfg.InsecureSkipVerify, cfg.WebSocketHost, cfg.WebSocketPath, cfg.RequireWebSocket)
+			lat, connectLat, tlsOk, httpStatus, colo, throughput, wsOk = probeHTTP(ctx, ip, cfg.Port, sni, cfg.Timeout, 0, cfg.InsecureSkipVerify, cfg.WebSocketHost, cfg.WebSocketPath, cfg.RequireWebSocket)
 			if wsOk {
 				r.WSOk = true
 			}
@@ -151,7 +148,24 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 		}
 	}
 
+	// Direct callers may request a speed sample as part of a single probe. Smart
+	// discovery passes SpeedBytes=0 here and runs a capped top-candidate phase.
+	if cfg.Mode == ModeHTTP && cfg.SpeedBytes > 0 && r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) && ctx.Err() == nil {
+		SpeedTest(ctx, r, cfg, cfg.SpeedBytes)
+	}
+
 	return r
+}
+
+// SpeedTest runs an optional bounded download sample for an already healthy
+// HTTP result. Failure is recorded as a tested result with zero throughput and
+// does not change protocol health.
+func SpeedTest(ctx context.Context, r *result.Result, cfg Config, bytes int64) {
+	if r == nil || bytes <= 0 || cfg.Mode != ModeHTTP || !r.IsHealthyForPhase1(result.DefaultMaxPhase1AvgLatency) || ctx.Err() != nil {
+		return
+	}
+	r.SpeedTested = true
+	r.Throughput, r.DownloadBytes, r.DownloadElapsed = probeDownload(ctx, r.IP, r.Port, cfg.Timeout, bytes)
 }
 
 // probeTCP measures a raw TCP connect time.
@@ -278,7 +292,7 @@ func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout tim
 
 	if httpStatus >= 200 && httpStatus < 400 && colo != "" {
 		if speedBytes > 0 {
-			throughput = probeDownload(ctx, ip, port, timeout, speedBytes)
+			throughput, _, _ = probeDownload(ctx, ip, port, timeout, speedBytes)
 		}
 		if speedBytes > 0 || requireWS {
 			wsOk = probeWebSocket(ctx, ip, port, sni, wsHost, wsPath, timeout)
@@ -419,9 +433,9 @@ func normalizeWSPath(path string) string {
 // probeDownload fetches a small sample from speed.cloudflare.com while forcing
 // the TCP connection to the candidate IP. This is still not a full Xray/V2Ray
 // test, but it catches many IPs that handshake cleanly and then stall on data.
-func probeDownload(ctx context.Context, ip net.IP, port int, timeout time.Duration, bytes int64) float64 {
+func probeDownload(ctx context.Context, ip net.IP, port int, timeout time.Duration, bytes int64) (float64, int64, time.Duration) {
 	if bytes <= 0 {
-		return 0
+		return 0, 0, 0
 	}
 
 	addr := fmt.Sprintf("%s:%d", ip.String(), port)
@@ -445,29 +459,30 @@ func probeDownload(ctx context.Context, ip net.IP, port int, timeout time.Durati
 	url := fmt.Sprintf("%s://speed.cloudflare.com/__down?bytes=%d", scheme, bytes)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0
+		return 0, 0, 0
 	}
 	req.Header.Set("User-Agent", "senpaiscanner/1.0")
 
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0
+		return 0, 0, 0
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return 0
+		return 0, 0, 0
 	}
 
 	n, err := io.Copy(io.Discard, io.LimitReader(resp.Body, bytes))
 	if err != nil || n <= 0 {
-		return 0
+		return 0, 0, 0
 	}
 	elapsed := time.Since(start).Seconds()
 	if elapsed <= 0 {
-		return 0
+		return 0, 0, 0
 	}
-	return float64(n) / elapsed
+	duration := time.Since(start)
+	return float64(n) / elapsed, n, duration
 }
 
 // parseColoCDN extracts the "colo" field from /cdn-cgi/trace responses.

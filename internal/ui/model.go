@@ -18,6 +18,7 @@ import (
 
 	"github.com/matinsenpai/senpaiscanner/internal/banner"
 	"github.com/matinsenpai/senpaiscanner/internal/config"
+	"github.com/matinsenpai/senpaiscanner/internal/ipsrc"
 	"github.com/matinsenpai/senpaiscanner/internal/result"
 	"github.com/matinsenpai/senpaiscanner/internal/xraytest"
 )
@@ -242,10 +243,12 @@ type AppModel struct {
 	configSelectedPorts map[int]bool
 	// phase 1 state
 	configPhase1Results []*result.Result
+	configPhase1Stats   phase1DiscoveryStats
 	configPhase1Done    bool
-	configPhase1Only    bool // true when scan stops after Phase 1 (no config URL)
-	configPhase1Stats   StatsMsg
-	configPhase1Total   int // intended IP count for Phase 1 progress display
+	configPhase1Only    bool   // true when scan stops after Phase 1 (no config URL)
+	configPhase1Total   int    // intended IP count for Phase 1 progress display
+	configColoAllow     string // code-configurable Phase 1 allowlist
+	configColoBlock     string // code-configurable Phase 1 blocklist
 	liveResultPath      string
 
 	// shared
@@ -394,7 +397,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.page == PageLiveColos {
 			m.colosResults = append(m.colosResults, msg.Result)
 		} else {
-			m.scanResults = append(m.scanResults, msg.Result)
+			m.scanResults = upsertPhase1Result(m.scanResults, msg.Result)
 			result.Sort(m.scanResults, m.sortBy)
 		}
 		return m, nil
@@ -434,7 +437,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ConfigPhase1ResultMsg:
-		m.configPhase1Results = append(m.configPhase1Results, msg.Result)
+		m.configPhase1Results = upsertPhase1Result(m.configPhase1Results, msg.Result)
+		return m, nil
+
+	case ConfigPhase1StatsMsg:
+		m.configPhase1Stats = msg.Discovery
+		if msg.PreviousLoaded > 0 {
+			m.configPhase1Stats.PreviousLoaded = msg.PreviousLoaded
+		}
+		return m, nil
+
+	case ConfigPhase1WarningMsg:
+		m.statusMsg = msg.Text
 		return m, nil
 
 	case ConfigPhase1ErrMsg:
@@ -456,9 +470,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		topN := m.resolveTopN()
 		var topIPs []*result.Result
 		if topN == 0 {
-			topIPs = result.TopN(m.configPhase1Results, 0)
+			topIPs = result.TopN(m.filteredPhase1Results(), 0)
 		} else {
-			topIPs = result.TopN(m.configPhase1Results, topN)
+			topIPs = result.TopN(m.filteredPhase1Results(), topN)
 		}
 		m.configTotal = len(topIPs)
 		// If Phase 1 found no healthy IPs, stay on the Phase 1 page and show
@@ -964,6 +978,13 @@ func formatEndpoint(ip string, port int) string {
 		return ip
 	}
 	return fmt.Sprintf("%s:%d", ip, port)
+}
+
+func formatPhase1Speed(r *result.Result) string {
+	if r == nil || r.Throughput <= 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.2f", r.SpeedMbps())
 }
 
 func formatValidationSpeed(throughput float64) string {
@@ -2379,7 +2400,7 @@ func (m AppModel) launchPhase1FromOptional() (AppModel, tea.Cmd) {
 	m.configPhase1Only = !withConfig
 	m.configPhase1Results = nil
 	m.configPhase1Done = false
-	m.configPhase1Stats = StatsMsg{}
+	m.configPhase1Stats = phase1DiscoveryStats{}
 	m.page = PageConfigPhase1
 
 	count := configCountValues[m.configCountIdx]
@@ -2600,7 +2621,7 @@ func (m AppModel) handleConfigSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.page = PageConfigPhase1
 		m.configPhase1Results = nil
 		m.configPhase1Done = false
-		m.configPhase1Stats = StatsMsg{}
+		m.configPhase1Stats = phase1DiscoveryStats{}
 		count := configCountValues[m.configCountIdx]
 		if count == 0 {
 			count, _ = strconv.Atoi(m.configCountCustom)
@@ -2625,7 +2646,12 @@ type ConfigPhase1ResultMsg struct {
 // ConfigPhase1ErrMsg is sent when Phase 1 cannot proceed (e.g. ips.txt missing).
 type ConfigPhase1ErrMsg struct{ Err string }
 
-type ConfigPhase1StatsMsg = StatsMsg
+type ConfigPhase1StatsMsg struct {
+	PreviousLoaded int
+	Discovery      phase1DiscoveryStats
+}
+
+type ConfigPhase1WarningMsg struct{ Text string }
 
 type ConfigPhase1DoneMsg struct{}
 
@@ -2654,7 +2680,12 @@ func (m AppModel) viewConfigPhase1() string {
 		styleGood.Render(fmt.Sprintf("%d", healthy)),
 		styleDim.Render(targetStr),
 	))
-	sb.WriteString(styleDim.Render(fmt.Sprintf("  max latency: %s", result.DefaultMaxPhase1AvgLatency)) + "\n\n")
+	sb.WriteString(styleDim.Render(fmt.Sprintf("  max latency: %s", result.DefaultMaxPhase1AvgLatency)) + "\n")
+	sb.WriteString(styleDim.Render(fmt.Sprintf("  neighbor expansion: top %d seeds, %d neighbors/seed, max %d", ipsrc.DefaultNeighborSeedLimit, ipsrc.DefaultNeighborPerHit, ipsrc.DefaultNeighborMaxTotal)) + "\n")
+	sb.WriteString(styleDim.Render(fmt.Sprintf("  speed tests: top %d healthy candidates only", config.MaxSpeedTestCandidates)) + "\n")
+	st := m.configPhase1Stats
+	sb.WriteString(styleDim.Render(fmt.Sprintf("  previous good IPs loaded/retested/healthy: %d/%d/%d", st.PreviousLoaded, st.PreviousRetested, st.PreviousHealthy)) + "\n")
+	sb.WriteString(styleDim.Render(fmt.Sprintf("  neighbor seeds/queued/tested: %d/%d/%d", st.SeedsExpanded, st.NeighborQueued, st.NeighborTested)) + "\n\n")
 	if !m.configPhase1Done {
 		sb.WriteString(fmt.Sprintf("  %s  %s  ports: %s\n\n",
 			styleAccent.Render(scanPulse(m.bannerFrame)),
@@ -2697,11 +2728,11 @@ func (m AppModel) viewConfigPhase1() string {
 	}
 
 	if len(m.configPhase1Results) > 0 {
-		hdr := fmt.Sprintf("  %-22s  %8s  %9s  %10s  %7s  %-8s  %6s",
-			"ENDPOINT", "SCORE", "RTT(ms)", "PROBE(ms)", "LOSS", "COLO", "STATUS")
+		hdr := fmt.Sprintf("  %-22s  %8s  %9s  %10s  %11s  %7s  %-8s  %6s",
+			"ENDPOINT", "SCORE", "RTT(ms)", "PROBE(ms)", "SPEED(Mbps)", "LOSS", "COLO", "STATUS")
 		sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 98))))
 
-		top := result.TopN(m.configPhase1Results, 20)
+		top := result.TopN(m.filteredPhase1Results(), 20)
 		for _, r := range top {
 			colo := r.Colo
 			if colo == "" {
@@ -2713,9 +2744,9 @@ func (m AppModel) viewConfigPhase1() string {
 				status = "✗"
 				lineStyle = styleBad
 			}
-			line := fmt.Sprintf("  %-22s  %7.1f   %9.2f  %10.2f  %6.1f%%  %-8s  %6s",
+			line := fmt.Sprintf("  %-22s  %7.1f   %9.2f  %10.2f  %11s  %6.1f%%  %-8s  %6s",
 				formatEndpoint(r.IP.String(), r.Port), r.QualityScore(),
-				float64(r.RTT().Milliseconds()), float64(r.Avg().Milliseconds()), r.Loss(), colo, status)
+				float64(r.RTT().Milliseconds()), float64(r.Avg().Milliseconds()), formatPhase1Speed(r), r.Loss(), colo, status)
 			sb.WriteString(lineStyle.Render(line) + "\n")
 		}
 		sb.WriteRune('\n')
@@ -2751,11 +2782,30 @@ func (m AppModel) handleConfigPhase1Key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m AppModel) copyPhase1RawHealthyIPs() string {
-	rawIPs := rawHealthyIPs(m.configPhase1Results)
+	rawIPs := rawHealthyIPs(m.filteredPhase1Results())
 	if len(rawIPs) == 0 {
 		return "no raw healthy IPs to copy"
 	}
 	return copyAndSaveRawHealthyIPs(m.liveResultPath, rawIPs)
+}
+
+func upsertPhase1Result(results []*result.Result, updated *result.Result) []*result.Result {
+	if updated == nil {
+		return results
+	}
+	for i, existing := range results {
+		if existing != nil && existing.Port == updated.Port && existing.IP.Equal(updated.IP) {
+			results[i] = updated
+			return results
+		}
+	}
+	return append(results, updated)
+}
+
+// filteredPhase1Results applies optional code-configurable colo filters only to
+// ranking/export lists; configPhase1Results remains the complete raw history.
+func (m AppModel) filteredPhase1Results() []*result.Result {
+	return result.NewColoFilter(m.configColoAllow, m.configColoBlock).Filter(m.configPhase1Results)
 }
 
 // rawHealthyIPs returns unique healthy Phase 1 IPs in the same quality order

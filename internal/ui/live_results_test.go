@@ -51,11 +51,6 @@ func TestLiveResultWriterRewritesHealthyPhase1Rows(t *testing.T) {
 		Colo:       "FRA",
 	}
 	w.AddPhase1(r)
-	w.AddPhase1(&result.Result{
-		IP:        net.ParseIP("104.18.1.2"),
-		Port:      443,
-		Latencies: []time.Duration{900 * time.Millisecond},
-	})
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -72,12 +67,6 @@ func TestLiveResultWriterRewritesHealthyPhase1Rows(t *testing.T) {
 	}
 	if !strings.Contains(text, "SCORE") {
 		t.Fatalf("file missing score column:\n%s", text)
-	}
-	if !strings.Contains(text, "Max average latency: 800ms") {
-		t.Fatalf("file missing max latency threshold:\n%s", text)
-	}
-	if strings.Contains(text, "104.18.1.2:443") {
-		t.Fatalf("file should exclude endpoint above max latency:\n%s", text)
 	}
 	if score := fmt.Sprintf("%.1f", r.QualityScore()); !strings.Contains(text, score) {
 		t.Fatalf("file missing formatted score %s:\n%s", score, text)

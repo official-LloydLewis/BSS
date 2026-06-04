@@ -113,21 +113,14 @@ func (r *Result) QualityScore() float64 {
 	latencyScore := 0.0
 	jitterScore := 0.0
 	if avg > 0 {
-		avgMS := float64(avg) / float64(time.Millisecond)
-		latencyScore = lowerIsBetterQuality(avgMS, 200)
-		switch {
-		case avgMS > 1000:
-			latencyScore *= 0.15
-		case avgMS > 500:
-			latencyScore *= 0.45
-		}
+		latencyScore = lowerIsBetterQuality(float64(avg)/float64(time.Millisecond), 100)
 		jitterScore = lowerIsBetterQuality(float64(jitter)/float64(time.Millisecond), 50)
 	}
 
 	throughput := math.Max(r.Throughput, 0)
 	throughputScore := clampQuality(100 * (1 - math.Exp(-throughput/(512*1024))))
 
-	score := lossScore*0.30 + latencyScore*0.40 + jitterScore*0.10 + throughputScore*0.10
+	score := lossScore*0.35 + latencyScore*0.25 + jitterScore*0.15 + throughputScore*0.15
 	if r.TLSOk {
 		score += 2
 	}
@@ -364,8 +357,7 @@ func Sort(results []*Result, by SortBy) {
 	})
 }
 
-// TopN returns the n best healthy results by quality score, applying the
-// default Phase 1 average-latency cutoff.
+// TopN returns the n best healthy results by quality score.
 func TopN(results []*Result, n int) []*Result {
 	return TopNWithMaxLatency(results, n, DefaultMaxPhase1AvgLatency)
 }

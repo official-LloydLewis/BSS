@@ -136,6 +136,7 @@ func TestConfigPhase1TableColumnsStayAligned(t *testing.T) {
 		value  string
 	}{
 		{header: "ENDPOINT", value: "172.67.145.191:8443"},
+		{header: "SCORE", value: strconv.FormatFloat(m.configPhase1Results[0].QualityScore(), 'f', 1, 64)},
 		{header: "COLO", value: "DME"},
 	} {
 		headerStart := strings.Index(headerLine, tc.header)

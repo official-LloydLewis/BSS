@@ -137,7 +137,7 @@ Press **Enter** on the last row to continue to the optional config step.
 
 Without a config URL, Phase 1 uses a standard Cloudflare HTTP probe (`speed.cloudflare.com`, 64 KiB sample). With a config URL, probes use SNI/host/path from your link and require WebSocket success when `type=ws`.
 
-Phase 1 result tables include a **SCORE** column: a quality score that favors lower loss, jitter, and latency, higher throughput, and successful protocol validation. By default, endpoints above 800ms average latency remain visible in scan history but are excluded from top, healthy-export, and Phase 2 candidate lists.
+Phase 1 result tables include a **SCORE** column: a quality score that favors lower loss, jitter, and latency, higher throughput, and successful protocol validation.
 
 Press `q` / `Esc` to cancel and return to the menu.
 

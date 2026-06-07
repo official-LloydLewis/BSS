@@ -16,7 +16,11 @@ const modifierRowCount = 7
 func (m AppModel) handleModifierKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	if key == "ctrl+c" {
-		return m, tea.Quit
+		if !m.modifierEditing {
+			m.page = PageHome
+			return m, nil
+		}
+		key = "esc"
 	}
 
 	if m.modifierEditing {
@@ -151,20 +155,22 @@ func (m *AppModel) updateModifierPlaceholder() {
 
 func (m AppModel) viewModifier() string {
 	var sb strings.Builder
-	separator := fmt.Sprintf("  %v\n\n", strings.Repeat("─", 72))
-
-	sb.WriteString(banner.Render(m.bannerFrame / 2))
+	if m.width >= 76 && m.height >= 30 {
+		sb.WriteString(banner.Render(m.bannerFrame / 2))
+		sb.WriteRune('\n')
+	}
+	sb.WriteString(styleTitle.Render("  V2ray Config Modifier"))
 	sb.WriteRune('\n')
-	sb.WriteString(styleTitle.Render("  V2ray Config Modifier\n"))
-	sb.WriteString(separator)
+	sb.WriteString(styleSep.Render("  " + strings.Repeat("─", clamp(m.width-4, 8, 72))))
+	sb.WriteString("\n\n")
 
 	rows := []string{
 		"Config",
-		fmt.Sprintf("Input Type              %s", styleAccent.Render(m.modifierType.String())),
+		fmt.Sprintf("Input Type  ‹ %s ›", m.modifierType.String()),
 		"Input Data",
 		"Generate Configs",
 		"Copy result to clipboard",
-		"Save result to file",
+		fmt.Sprintf("Save result to file  (%s)", m.modifierSavePath.Value()),
 		"Back",
 	}
 	for i, row := range rows {
@@ -178,36 +184,35 @@ func (m AppModel) viewModifier() string {
 	}
 
 	sb.WriteString("\n")
-	if m.modifierEditing && !m.modifierSaving && m.modifierRow == 0 {
-		sb.WriteString(styleHeader.Render("  Config input (ctrl+s or esc to finish)\n"))
+	switch {
+	case m.modifierEditing && !m.modifierSaving && m.modifierRow == 0:
+		sb.WriteString(styleHeader.Render("  Config input — multiline paste supported (ctrl+s or esc to finish)") + "\n")
 		sb.WriteString("  " + m.modifierConfig.View() + "\n")
-	} else if m.modifierEditing && !m.modifierSaving && m.modifierRow == 2 {
-		sb.WriteString(styleHeader.Render(fmt.Sprintf("  %s input (ctrl+s or esc to finish)\n", m.modifierType.String())))
+	case m.modifierEditing && !m.modifierSaving && m.modifierRow == 2:
+		sb.WriteString(styleHeader.Render(fmt.Sprintf("  %s input — multiline paste supported (ctrl+s or esc to finish)", m.modifierType.String())) + "\n")
 		sb.WriteString("  " + m.modifierInput.View() + "\n")
-	} else if m.modifierSaving {
-		sb.WriteString(styleHeader.Render("  Output file path (enter to save, esc to cancel)\n"))
+	case m.modifierSaving:
+		sb.WriteString(styleHeader.Render("  Output file path (enter to save, esc to cancel)") + "\n")
 		sb.WriteString("  " + m.modifierSavePath.View() + "\n")
-	} else {
-		sb.WriteString(styleDim.Render(fmt.Sprintf("  Configs: %d line(s)   Input data: %d line(s)   Result: %d config(s)\n", countNonEmptyLines(m.modifierConfig.Value()), countNonEmptyLines(m.modifierInput.Value()), countLines(m.modifierResult))))
-	}
-
-	if m.statusMsg != "" {
-		sb.WriteString("\n  " + styleWarn.Render(m.statusMsg) + "\n")
-	}
-	if m.modifierResult != "" {
-		sb.WriteString("\n" + styleHeader.Render("  Result preview\n"))
-		for _, line := range previewLines(m.modifierResult, 6) {
-			sb.WriteString("  " + styleDim.Render(line) + "\n")
+	default:
+		sb.WriteString(styleDim.Render(fmt.Sprintf("  Configs: %d line(s)   Input: %d line(s)   Result: %d config(s)", countNonEmptyLines(m.modifierConfig.Value()), countNonEmptyLines(m.modifierInput.Value()), countLines(m.modifierResult))) + "\n")
+		if m.modifierResult != "" {
+			previewCount := clamp(m.height-21, 1, 8)
+			sb.WriteString(styleHeader.Render("  Result preview") + "\n")
+			for _, line := range previewLines(m.modifierResult, previewCount) {
+				sb.WriteString("  " + styleDim.Render(line) + "\n")
+			}
 		}
 	}
 
-	sb.WriteString("\n")
-	if m.modifierEditing {
-		sb.WriteString(styleHint.Render("  Multiline paste supported. Result stays visible after copy/save errors."))
-	} else {
-		sb.WriteString(styleHint.Render("  ↑/↓ navigate   ←/→ change input type   enter select   q/esc back"))
+	if m.statusMsg != "" {
+		sb.WriteString("\n" + styleWarn.Render("  "+m.statusMsg) + "\n")
 	}
-	sb.WriteRune('\n')
+	if m.modifierEditing {
+		sb.WriteString(styleHint.Render("  esc/ctrl+c cancel or finish"))
+	} else {
+		sb.WriteString(styleHint.Render("  ↑/↓ navigate   ←/→ input type   enter select   esc back"))
+	}
 	return sb.String()
 }
 

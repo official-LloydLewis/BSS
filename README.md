@@ -83,7 +83,7 @@ senpaiscanner -v           # same
 senpaiscanner version      # same
 ```
 
-Everything else is inside the TUI — there are no scan-related CLI flags.
+Everything else is inside the TUI — there are no scan-related CLI flags. The alternate-screen UI redraws within a terminal-sized frame, so headers, navigation hints, status bars, and live result panels stay in place during large scans and terminal resizes.
 
 ### Navigation
 
@@ -92,7 +92,8 @@ Everything else is inside the TUI — there are no scan-related CLI flags.
 | `↑` / `↓` or `k` / `j` | move between rows |
 | `←` / `→` or `h` / `l` | move between options within a row |
 | `Enter` | select / confirm / start |
-| `Esc` | go back |
+| `Esc` | cancel input or go back |
+| `Ctrl+C` | cancel modifier input or return from the modifier page |
 | `q` | quit from menu; during a scan, cancel or return to menu when finished |
 
 On the **Config URL** row, `←` / `→` move the text cursor; `Ctrl+A` / `Ctrl+E` jump to start / end. Vim keys `h` / `j` / `k` / `l` type normally into the URL field on that row.
@@ -176,7 +177,7 @@ The **V2ray Config Modifier** menu item ports the simple workflow from the v2ray
 | **Copy result to clipboard** | copy the generated list when clipboard support is available |
 | **Save result to file** | save the list; the default path is `modified-configs.txt` |
 
-Press `Ctrl+S` or `Esc` to finish editing a multiline field. Generated results remain visible if clipboard access or file saving fails.
+Press `Ctrl+S`, `Esc`, or `Ctrl+C` to finish editing a multiline field. Generated results remain visible if clipboard access or file saving fails.
 
 ### About
 

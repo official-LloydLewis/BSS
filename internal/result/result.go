@@ -23,6 +23,7 @@ type Result struct {
 	WSOk             bool // WebSocket connection survived hold test
 	RequireWS        bool // true when WebSocket success is part of health criteria
 	HTTPStatus       int
+	HTTP2            bool // true when an HTTP probe negotiated HTTP/2
 	Colo             string
 	Throughput       float64 // bytes/sec, 0 if not measured
 	DownloadBytes    int64

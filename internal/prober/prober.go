@@ -106,6 +106,7 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 		var connectLat time.Duration
 		var tlsOk bool
 		var httpStatus int
+		var http2 bool
 		var colo string
 		var throughput float64
 
@@ -117,7 +118,7 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 			lat, connectLat, tlsOk = probeTLS(ctx, ip, cfg.Port, sni, cfg.Timeout, cfg.InsecureSkipVerify)
 		case ModeHTTP:
 			var wsOk bool
-			lat, connectLat, tlsOk, httpStatus, colo, throughput, wsOk = probeHTTP(ctx, ip, cfg.Port, sni, cfg.Timeout, 0, cfg.InsecureSkipVerify, cfg.WebSocketHost, cfg.WebSocketPath, cfg.RequireWebSocket)
+			lat, connectLat, tlsOk, httpStatus, colo, throughput, wsOk, http2 = probeHTTP(ctx, ip, cfg.Port, sni, cfg.Timeout, 0, cfg.InsecureSkipVerify, cfg.WebSocketHost, cfg.WebSocketPath, cfg.RequireWebSocket)
 			if wsOk {
 				r.WSOk = true
 			}
@@ -130,6 +131,9 @@ func Probe(ctx context.Context, ip net.IP, cfg Config) *result.Result {
 		}
 		if httpStatus != 0 {
 			r.HTTPStatus = httpStatus
+		}
+		if http2 {
+			r.HTTP2 = true
 		}
 		if colo != "" {
 			r.Colo = colo
@@ -217,7 +221,7 @@ func probeTLS(ctx context.Context, ip net.IP, port int, sni string, timeout time
 // probeHTTP fetches /cdn-cgi/trace to confirm the IP is a real Cloudflare edge
 // and to determine the colo identifier.
 func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout time.Duration, speedBytes int64, insecure bool, wsHost, wsPath string, requireWS bool) (
-	lat time.Duration, connectLat time.Duration, tlsOk bool, httpStatus int, colo string, throughput float64, wsOk bool,
+	lat time.Duration, connectLat time.Duration, tlsOk bool, httpStatus int, colo string, throughput float64, wsOk bool, http2 bool,
 ) {
 	addr := fmt.Sprintf("%s:%d", ip.String(), port)
 	var connectMu sync.Mutex
@@ -252,6 +256,7 @@ func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout tim
 			InsecureSkipVerify: insecure,
 		},
 		DisableKeepAlives:   true,
+		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: timeout / 2,
 	}
 
@@ -275,7 +280,7 @@ func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout tim
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, getConnectLat(), false, 0, "", 0, false
+		return 0, getConnectLat(), false, 0, "", 0, false, false
 	}
 	lat = time.Since(start)
 	connectLat = getConnectLat()
@@ -283,6 +288,7 @@ func probeHTTP(ctx context.Context, ip net.IP, port int, sni string, timeout tim
 
 	tlsOk = resp.TLS != nil
 	httpStatus = resp.StatusCode
+	http2 = resp.ProtoMajor == 2
 	colo = parseColoRay(resp.Header.Get("CF-Ray"))
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -449,6 +455,7 @@ func probeDownload(ctx context.Context, ip net.IP, port int, timeout time.Durati
 			InsecureSkipVerify: insecure,
 		},
 		DisableKeepAlives:   true,
+		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: timeout / 2,
 	}
 	client := &http.Client{Timeout: timeout, Transport: transport}

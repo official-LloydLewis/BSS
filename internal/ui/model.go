@@ -205,14 +205,16 @@ type AppModel struct {
 	modeIdx    int
 
 	// live scan state
-	activeScanID int64
-	scanResults  []*result.Result
-	sortBy       result.SortBy
-	sortIdx      int
-	scanStats    StatsMsg
-	scanDone     bool
-	scanStarted  time.Time
-	scanTotal    int
+	activeScanID    int64
+	scanResults     []*result.Result
+	scanResultIndex map[string]int
+	scanTopResults  []*result.Result
+	sortBy          result.SortBy
+	sortIdx         int
+	scanStats       StatsMsg
+	scanDone        bool
+	scanStarted     time.Time
+	scanTotal       int
 
 	// colos
 	colosResults []*result.Result
@@ -244,14 +246,15 @@ type AppModel struct {
 	configPortFocus     int
 	configSelectedPorts map[int]bool
 	// phase 1 state
-	configPhase1Results []*result.Result
-	configPhase1Stats   phase1DiscoveryStats
-	configPhase1Done    bool
-	configPhase1Only    bool   // true when scan stops after Phase 1 (no config URL)
-	configPhase1Total   int    // intended IP count for Phase 1 progress display
-	configColoAllow     string // code-configurable Phase 1 allowlist
-	configColoBlock     string // code-configurable Phase 1 blocklist
-	liveResultPath      string
+	configPhase1Results     []*result.Result
+	configPhase1ResultIndex map[string]int
+	configPhase1Stats       phase1DiscoveryStats
+	configPhase1Done        bool
+	configPhase1Only        bool   // true when scan stops after Phase 1 (no config URL)
+	configPhase1Total       int    // intended IP count for Phase 1 progress display
+	configColoAllow         string // code-configurable Phase 1 allowlist
+	configColoBlock         string // code-configurable Phase 1 blocklist
+	liveResultPath          string
 
 	// v2ray config modifier
 	modifierRow      int
@@ -310,8 +313,8 @@ func NewApp(version string) AppModel {
 		spinner:          sp,
 		scanCfg:          defaultScanConfig(),
 		version:          version,
-		width:            120,
-		height:           40,
+		width:            defaultTerminalWidth,
+		height:           defaultTerminalHeight,
 		scanStarted:      time.Now(),
 		quickCustomInput: customInput,
 		configWorkersIdx: 0,
@@ -409,8 +412,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
+		m.resize(msg.Width, msg.Height)
 		return m, nil
 
 	case tickMsg:
@@ -429,8 +431,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.page == PageLiveColos {
 			m.colosResults = append(m.colosResults, msg.Result)
 		} else {
-			m.scanResults = upsertPhase1Result(m.scanResults, msg.Result)
-			result.Sort(m.scanResults, m.sortBy)
+			m.scanResults, m.scanResultIndex = upsertIndexedResult(m.scanResults, m.scanResultIndex, msg.Result)
+			m.scanTopResults = updateTopResults(m.scanTopResults, msg.Result, m.sortBy, 20)
 		}
 		return m, nil
 
@@ -469,7 +471,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ConfigPhase1ResultMsg:
-		m.configPhase1Results = upsertPhase1Result(m.configPhase1Results, msg.Result)
+		m.configPhase1Results, m.configPhase1ResultIndex = upsertIndexedResult(m.configPhase1Results, m.configPhase1ResultIndex, msg.Result)
 		return m, nil
 
 	case ConfigPhase1StatsMsg:
@@ -850,6 +852,8 @@ func (m AppModel) launchQuickScan() (tea.Model, tea.Cmd) {
 	m.activeScanID = nextScanID()
 	m.statusMsg = ""
 	m.scanResults = nil
+	m.scanResultIndex = nil
+	m.scanTopResults = nil
 	m.scanDone = false
 	m.scanStats = StatsMsg{ScanID: m.activeScanID}
 	m.scanStarted = time.Now()
@@ -902,6 +906,8 @@ func (m AppModel) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.activeScanID = nextScanID()
 		m.statusMsg = ""
 		m.scanResults = nil
+		m.scanResultIndex = nil
+		m.scanTopResults = nil
 		m.scanDone = false
 		m.scanStats = StatsMsg{ScanID: m.activeScanID}
 		m.scanStarted = time.Now()
@@ -944,7 +950,7 @@ func (m AppModel) handleLiveScanKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		m.sortIdx = (m.sortIdx + 1) % 5
 		m.sortBy = result.SortBy(m.sortIdx)
-		result.Sort(m.scanResults, m.sortBy)
+		m.scanTopResults = topResults(m.scanResults, m.sortBy, 20)
 	case "enter":
 		if m.scanDone {
 			m.page = PageResults
@@ -1239,38 +1245,105 @@ func (m AppModel) updateFormInputs(msg tea.Msg) (AppModel, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// resize updates child controls as well as the outer frame so pasted and typed
+// multiline content always wraps inside the visible terminal.
+func (m *AppModel) resize(width, height int) {
+	m.width = maxInt(width, 1)
+	m.height = maxInt(height, 1)
+	contentWidth := clamp(m.width-8, 20, 100)
+	textareaHeight := clamp((m.height-20)/2, 3, 8)
+	m.modifierConfig.SetWidth(contentWidth)
+	m.modifierConfig.SetHeight(textareaHeight)
+	m.modifierInput.SetWidth(contentWidth)
+	m.modifierInput.SetHeight(textareaHeight)
+	m.modifierSavePath.Width = clamp(m.width-12, 12, 80)
+	for i := range m.formInputs {
+		m.formInputs[i].Width = clamp(m.width-28, 12, 60)
+	}
+}
+
+func resultKey(r *result.Result) string {
+	if r == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d", r.IP.String(), r.Port)
+}
+
+// upsertIndexedResult avoids an O(n) scan for every live result. The map is
+// rebuilt lazily for models created by tests or restored without an index.
+func upsertIndexedResult(results []*result.Result, index map[string]int, updated *result.Result) ([]*result.Result, map[string]int) {
+	if updated == nil {
+		return results, index
+	}
+	if index == nil {
+		index = make(map[string]int, len(results)+1)
+		for i, existing := range results {
+			index[resultKey(existing)] = i
+		}
+	}
+	key := resultKey(updated)
+	if i, ok := index[key]; ok {
+		results[i] = updated
+		return results, index
+	}
+	index[key] = len(results)
+	return append(results, updated), index
+}
+
+func topResults(results []*result.Result, sortBy result.SortBy, limit int) []*result.Result {
+	rows := append([]*result.Result(nil), results...)
+	result.Sort(rows, sortBy)
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows
+}
+
+// updateTopResults keeps live rendering bounded even when hundreds of thousands
+// of results arrive. Sorting at most a small display cache avoids repeatedly
+// sorting the complete scan history on every Bubble Tea message.
+func updateTopResults(top []*result.Result, updated *result.Result, sortBy result.SortBy, limit int) []*result.Result {
+	top = upsertPhase1Result(top, updated)
+	result.Sort(top, sortBy)
+	if limit > 0 && len(top) > limit {
+		top = top[:limit]
+	}
+	return top
+}
+
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
 
 func (m AppModel) View() string {
+	var view string
 	switch m.page {
 	case PageHome:
-		return m.viewHome()
+		view = m.viewHome()
 	case PageQuickScanCount:
-		return m.viewQuickScanCount()
+		view = m.viewQuickScanCount()
 	case PageScanConfig:
-		return m.viewScanConfig()
+		view = m.viewScanConfig()
 	case PageLiveScan:
-		return m.viewLiveScan()
+		view = m.viewLiveScan()
 	case PageResults:
-		return m.viewResults()
+		view = m.viewResults()
 	case PageLiveColos:
-		return m.viewLiveColos()
+		view = m.viewLiveColos()
 	case PageAbout:
-		return m.viewAbout()
+		view = m.viewAbout()
 	case PageModifier:
-		return m.viewModifier()
+		view = m.viewModifier()
 	case PageScanWithConfig:
-		return m.viewScanWithConfig()
+		view = m.viewScanWithConfig()
 	case PageConfigOptional:
-		return m.viewConfigOptional()
+		view = m.viewConfigOptional()
 	case PageConfigPhase1:
-		return m.viewConfigPhase1()
+		view = m.viewConfigPhase1()
 	case PageConfigPhase2:
-		return m.viewScanWithConfig()
+		view = m.viewScanWithConfig()
 	}
-	return ""
+	return fixedFrame(view, m.width, m.height)
 }
 
 // ---------------------------------------------------------------------------
@@ -1478,92 +1551,122 @@ func (m AppModel) viewScanConfig() string {
 func (m AppModel) viewLiveScan() string {
 	var sb strings.Builder
 
-	sb.WriteString(styleTitle.Render("\n  ⚡  Live Scan\n"))
-	sb.WriteString(fmt.Sprintf("%s\n\n", styleSep.Render("  "+strings.Repeat("─", minInt(m.width-4, 70)))))
+	sb.WriteString(styleTitle.Render("\n  ⚡  Live Scan"))
+	sb.WriteString("\n")
+	sb.WriteString(styleSep.Render("  " + strings.Repeat("─", clamp(m.width-4, 8, 96))))
+	sb.WriteString("\n")
 
-	// Stats row
 	elapsed := time.Since(m.scanStarted).Round(time.Second)
-	rateStr := "—"
-	if elapsed.Seconds() > 0 && m.scanStats.Tested > 0 {
-		rateStr = fmt.Sprintf("%.0f/s", float64(m.scanStats.Tested)/elapsed.Seconds())
+	rate := 0.0
+	if elapsed.Seconds() > 0 {
+		rate = float64(m.scanStats.Tested) / elapsed.Seconds()
 	}
-
+	remaining := int64(0)
+	if m.scanTotal > 0 && int64(m.scanTotal) > m.scanStats.Tested {
+		remaining = int64(m.scanTotal) - m.scanStats.Tested
+	}
 	icon := m.spinner.View()
+	state := "Scanning"
 	if m.scanDone {
 		icon = styleGood.Render("✓")
+		state = "Complete"
 	}
 
-	progBar := ""
+	// Keep the status block a stable height so result rows never move while
+	// counters change from single to multi-digit values.
+	sb.WriteString(fmt.Sprintf("  %s  %s\n", icon, styleAccent.Render(state)))
+	if m.width >= 72 {
+		sb.WriteString(fmt.Sprintf("  IPs Scanned %-10d  Remaining %-10d  Good %-8d  Failed %-8d\n",
+			m.scanStats.Tested, remaining, m.scanStats.Healthy, m.scanStats.Failed))
+		sb.WriteString(fmt.Sprintf("  Speed       %-10.1f  Elapsed   %-10s  In flight %-8d\n", rate, elapsed.String(), m.scanStats.InFlight))
+	} else {
+		sb.WriteString(fmt.Sprintf("  Scanned %d / Remaining %d\n", m.scanStats.Tested, remaining))
+		sb.WriteString(fmt.Sprintf("  Good %d / Failed %d / %.1f IPs/sec / %s\n", m.scanStats.Healthy, m.scanStats.Failed, rate, elapsed.String()))
+	}
+
 	if m.scanTotal > 0 {
-		pct := float64(m.scanStats.Tested) / float64(m.scanTotal) * 100
-		bw := 22
-		filled := int(pct / 100 * float64(bw))
-		progBar = "  [" + styleAccent.Render(strings.Repeat("█", filled)) +
-			styleDim.Render(strings.Repeat("░", bw-filled)) + "]" +
-			fmt.Sprintf(" %.0f%%", pct)
+		pct := float64(m.scanStats.Tested) / float64(m.scanTotal)
+		if pct > 1 {
+			pct = 1
+		}
+		barWidth := clamp(m.width-18, 8, 50)
+		filled := int(pct * float64(barWidth))
+		sb.WriteString("  [" + styleAccent.Render(strings.Repeat("█", filled)) + styleDim.Render(strings.Repeat("░", barWidth-filled)) + fmt.Sprintf("] %5.1f%%\n", pct*100))
+	} else {
+		sb.WriteString("\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("  %s  tested: %s  healthy: %s  failed: %s  flying: %s  rate: %s  %s%s\n\n",
-		icon,
-		styleAccent.Render(fmt.Sprintf("%d", m.scanStats.Tested)),
-		styleGood.Render(fmt.Sprintf("%d", m.scanStats.Healthy)),
-		styleBad.Render(fmt.Sprintf("%d", m.scanStats.Failed)),
-		styleDim.Render(fmt.Sprintf("%d", m.scanStats.InFlight)),
-		styleDim.Render(rateStr),
-		styleDim.Render(elapsed.String()),
-		progBar,
-	))
+	sb.WriteString("\n")
+	sb.WriteString(styleHeader.Render("  Top Results"))
+	sb.WriteString("\n")
 
-	// Table header
-	hdr := fmt.Sprintf("  %-18s  %7s  %7s  %9s  %10s  %9s  %5s  %-6s",
-		"IP", "SCORE", "LOSS", "RTT(ms)", "PROBE(ms)", "DL(KB/s)", "TLS", "COLO")
-	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 84))))
-
-	maxRows := m.height - 14
-	if maxRows < 3 {
-		maxRows = 3
+	maxRows := clamp(m.height-14, 1, 20)
+	rows := m.scanTopResults
+	if len(rows) == 0 && len(m.scanResults) > 0 {
+		// Lazy fallback supports restored models and direct construction in tests.
+		rows = topResults(m.scanResults, m.sortBy, 20)
 	}
-	rows := m.scanResults
 	if len(rows) > maxRows {
 		rows = rows[:maxRows]
 	}
 
+	wide := m.width >= 82
+	if wide {
+		hdr := fmt.Sprintf("  %-22s %8s %9s %10s %5s %6s %6s", "ENDPOINT", "RTT", "SCORE", "STABILITY", "TLS", "HTTP2", "COLO")
+		sb.WriteString(styleHeader.Render(hdr) + "\n")
+		sb.WriteString(styleSep.Render("  "+strings.Repeat("─", 78)) + "\n")
+	} else {
+		hdr := fmt.Sprintf("  %-18s %7s %7s %6s", "IP", "RTT", "SCORE", "STABLE")
+		sb.WriteString(styleHeader.Render(hdr) + "\n")
+		sb.WriteString(styleSep.Render("  "+strings.Repeat("─", 44)) + "\n")
+	}
+
+	if len(rows) == 0 {
+		sb.WriteString(styleDim.Render("  Waiting for probe results…") + "\n")
+	}
 	for _, r := range rows {
-		tlsIcon := styleBad.Render("✗")
+		tls := "—"
 		if r.TLSOk {
-			tlsIcon = styleGood.Render("✓")
+			tls = "yes"
+		} else if r.ProbeMode == "tls" || r.ProbeMode == "http" {
+			tls = "no"
 		}
+		http2 := "—"
+		if r.ProbeMode == "http" {
+			http2 = "no"
+			if r.HTTP2 {
+				http2 = "yes"
+			}
+		}
+		stability := 100 - r.Loss()
 		colo := r.Colo
 		if colo == "" {
 			colo = "—"
 		}
-		line := fmt.Sprintf("  %-18s  %7.1f  %6.1f%%  %9.2f  %10.2f  %9.1f  %5s  %-6s",
-			r.IP.String(), r.QualityScore(), r.Loss(),
-			float64(r.RTT().Milliseconds()),
-			float64(r.Avg().Milliseconds()),
-			r.Throughput/1024,
-			tlsIcon, colo)
-
-		switch {
-		case r.IsHealthy() && r.Loss() == 0 && r.RTT().Milliseconds() < 200:
-			sb.WriteString(fmt.Sprintf("%s\n", styleGood.Render(line)))
-		case !r.IsHealthy():
-			sb.WriteString(fmt.Sprintf("%s\n", styleBad.Render(line)))
-		default:
-			sb.WriteString(fmt.Sprintf("%s\n", styleWarn.Render(line)))
+		var line string
+		if wide {
+			line = fmt.Sprintf("  %-22s %6dms %8.1f %9.1f%% %5s %6s %6s",
+				formatEndpoint(r.IP.String(), r.Port), r.RTT().Milliseconds(), r.QualityScore(), stability, tls, http2, colo)
+		} else {
+			line = fmt.Sprintf("  %-18s %5dms %7.1f %5.0f%%", r.IP.String(), r.RTT().Milliseconds(), r.QualityScore(), stability)
+		}
+		if r.IsHealthy() {
+			sb.WriteString(styleGood.Render(line) + "\n")
+		} else {
+			sb.WriteString(styleBad.Render(line) + "\n")
 		}
 	}
 
-	sb.WriteRune('\n')
 	sortNames := []string{"rtt", "loss", "jitter", "colo", "speed"}
-	hint := fmt.Sprintf("  s sort(→%s)   c copy IPs   q/esc back", sortNames[m.sortIdx%5])
+	hint := fmt.Sprintf("s sort(→%s)   c copy IPs   q/esc cancel", sortNames[m.sortIdx%len(sortNames)])
 	if m.scanDone {
-		hint = fmt.Sprintf("  s sort(→%s)   c copy IPs   enter/q → results", sortNames[m.sortIdx%5])
+		hint = fmt.Sprintf("s sort(→%s)   c copy IPs   enter/q results", sortNames[m.sortIdx%len(sortNames)])
 	}
 	if m.statusMsg != "" {
-		sb.WriteString(styleGood.Render("  "+m.statusMsg) + "\n")
+		sb.WriteString("\n" + styleWarn.Render("  "+m.statusMsg))
 	}
-	sb.WriteString(styleHint.Render(hint))
+	// The outer fixedFrame keeps this status/navigation area within the screen.
+	sb.WriteString("\n" + styleHint.Render("  "+hint))
 	return sb.String()
 }
 
@@ -2460,6 +2563,7 @@ func (m AppModel) launchPhase1FromOptional() (AppModel, tea.Cmd) {
 	m.statusMsg = ""
 	m.configPhase1Only = !withConfig
 	m.configPhase1Results = nil
+	m.configPhase1ResultIndex = nil
 	m.configPhase1Done = false
 	m.configPhase1Stats = phase1DiscoveryStats{}
 	m.page = PageConfigPhase1
@@ -2681,6 +2785,7 @@ func (m AppModel) handleConfigSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Start Phase 1
 		m.page = PageConfigPhase1
 		m.configPhase1Results = nil
+		m.configPhase1ResultIndex = nil
 		m.configPhase1Done = false
 		m.configPhase1Stats = phase1DiscoveryStats{}
 		count := configCountValues[m.configCountIdx]
